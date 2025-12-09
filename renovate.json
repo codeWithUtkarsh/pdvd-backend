@@ -28,7 +28,7 @@
     },
     {
       "matchPackageNames": ["github.com/google/osv-scanner"],
-      "pinVersions": ["v1.9.2"]
+      "allowedVersions": "v1.9.2"
     }
   ],
   "separateMajorMinor": false,
