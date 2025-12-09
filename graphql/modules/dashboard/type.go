@@ -45,7 +45,29 @@ var VulnerabilityTrendType = graphql.NewObject(graphql.ObjectConfig{
 		"date":     &graphql.Field{Type: graphql.String},
 		"critical": &graphql.Field{Type: graphql.Int},
 		"high":     &graphql.Field{Type: graphql.Int},
-		"medium":   &graphql.Field{Type: graphql.Int}, // Added
-		"low":      &graphql.Field{Type: graphql.Int}, // Added
+		"medium":   &graphql.Field{Type: graphql.Int},
+		"low":      &graphql.Field{Type: graphql.Int},
+	},
+})
+
+// SeverityMetricType represents a count and its delta for a specific severity
+var SeverityMetricType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "SeverityMetric",
+	Fields: graphql.Fields{
+		"count": &graphql.Field{Type: graphql.Int},
+		"delta": &graphql.Field{Type: graphql.Int},
+	},
+})
+
+// DashboardGlobalStatusType represents the aggregated vulnerability status across all endpoints
+var DashboardGlobalStatusType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "DashboardGlobalStatus",
+	Fields: graphql.Fields{
+		"critical":    &graphql.Field{Type: SeverityMetricType},
+		"high":        &graphql.Field{Type: SeverityMetricType},
+		"medium":      &graphql.Field{Type: SeverityMetricType},
+		"low":         &graphql.Field{Type: SeverityMetricType},
+		"total_count": &graphql.Field{Type: graphql.Int},
+		"total_delta": &graphql.Field{Type: graphql.Int},
 	},
 })

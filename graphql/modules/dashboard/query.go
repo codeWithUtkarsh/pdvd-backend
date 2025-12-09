@@ -47,5 +47,16 @@ func GetQueryFields(db database.DBConnection) graphql.Fields {
 				return ResolveVulnerabilityTrend(db, days)
 			},
 		},
+		// Section 5: Aggregated Endpoint Status with Deltas
+		"dashboardGlobalStatus": &graphql.Field{
+			Type: DashboardGlobalStatusType,
+			Args: graphql.FieldConfigArgument{
+				"limit": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 100},
+			},
+			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+				limit := p.Args["limit"].(int)
+				return ResolveDashboardGlobalStatus(db, limit)
+			},
+		},
 	}
 }
