@@ -1,3 +1,4 @@
+// Package vulnerabilities implements the resolvers for vulnerability data.
 package vulnerabilities
 
 import (
@@ -18,6 +19,7 @@ func isVersionAffectedAny(version string, allAffected []models.Affected) bool {
 	return false
 }
 
+// ResolveVulnerabilities fetches a list of vulnerabilities with optional limiting.
 func ResolveVulnerabilities(db database.DBConnection, limit int) ([]map[string]interface{}, error) {
 	ctx := context.Background()
 

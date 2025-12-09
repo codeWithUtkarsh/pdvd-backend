@@ -1,3 +1,4 @@
+// Package dashboard defines the GraphQL types for the application dashboard.
 package dashboard
 
 import (

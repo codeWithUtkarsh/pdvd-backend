@@ -1,9 +1,11 @@
+// Package endpoints defines the GraphQL types for endpoint management.
 package endpoints
 
 import (
 	"github.com/graphql-go/graphql"
 )
 
+// ReleaseInfoType represents basic release information.
 var ReleaseInfoType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "ReleaseInfo",
 	Fields: graphql.Fields{
@@ -12,6 +14,7 @@ var ReleaseInfoType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// SyncedEndpointType represents an endpoint that has been synced.
 var SyncedEndpointType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "SyncedEndpoint",
 	Fields: graphql.Fields{
@@ -25,6 +28,7 @@ var SyncedEndpointType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// AffectedEndpointType represents an endpoint affected by vulnerabilities.
 var AffectedEndpointType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "AffectedEndpoint",
 	Fields: graphql.Fields{

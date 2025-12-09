@@ -1,3 +1,4 @@
+// Package vulnerabilities defines the GraphQL queries for vulnerability management.
 package vulnerabilities
 
 import (
@@ -5,6 +6,7 @@ import (
 	"github.com/ortelius/pdvd-backend/v12/database"
 )
 
+// GetQueryFields returns the vulnerability queries to be mounted in the root schema.
 func GetQueryFields(db database.DBConnection) graphql.Fields {
 	return graphql.Fields{
 		"vulnerabilities": &graphql.Field{

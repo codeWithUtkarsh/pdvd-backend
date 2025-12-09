@@ -1,9 +1,11 @@
+// Package vulnerabilities defines the GraphQL types for vulnerability management.
 package vulnerabilities
 
 import (
 	"github.com/graphql-go/graphql"
 )
 
+// SeverityType is the GraphQL Enum for vulnerability severity levels.
 var SeverityType = graphql.NewEnum(graphql.EnumConfig{
 	Name: "Severity",
 	Values: graphql.EnumValueConfigMap{
@@ -15,6 +17,7 @@ var SeverityType = graphql.NewEnum(graphql.EnumConfig{
 	},
 })
 
+// VulnerabilityCountType is the GraphQL Object for aggregated vulnerability counts.
 var VulnerabilityCountType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "VulnerabilityCount",
 	Fields: graphql.Fields{
@@ -25,6 +28,7 @@ var VulnerabilityCountType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// VulnerabilityType is the GraphQL Object for individual vulnerability details.
 var VulnerabilityType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "Vulnerability",
 	Fields: graphql.Fields{
@@ -44,6 +48,7 @@ var VulnerabilityType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// MitigationType is the GraphQL Object for vulnerability mitigation details.
 var MitigationType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "Mitigation",
 	Fields: graphql.Fields{

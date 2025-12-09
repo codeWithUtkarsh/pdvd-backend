@@ -1,3 +1,4 @@
+// Package releases defines the GraphQL queries for release management.
 package releases
 
 import (
@@ -11,6 +12,7 @@ import (
 	"github.com/ortelius/pdvd-backend/v12/model"
 )
 
+// GetQueryFields returns the release queries to be mounted in the root schema.
 func GetQueryFields(db database.DBConnection, releaseType *graphql.Object, affectedReleaseType *graphql.Object, severityType *graphql.Enum) graphql.Fields {
 	return graphql.Fields{
 		"release": &graphql.Field{

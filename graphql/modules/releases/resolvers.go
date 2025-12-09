@@ -1,3 +1,4 @@
+// Package releases implements the resolvers for release data.
 package releases
 
 import (
@@ -33,6 +34,7 @@ func getFloatValue(f *float64) float64 {
 	return *f
 }
 
+// ResolveReleaseVulnerabilities fetches vulnerabilities associated with a specific release.
 func ResolveReleaseVulnerabilities(db database.DBConnection, name, version string) ([]map[string]interface{}, error) {
 	ctx := context.Background()
 
@@ -203,6 +205,7 @@ func ResolveReleaseVulnerabilities(db database.DBConnection, name, version strin
 	return vulnerabilities, nil
 }
 
+// ResolveAffectedEndpoints fetches endpoints where a specific release is deployed.
 func ResolveAffectedEndpoints(db database.DBConnection, name, version string) ([]map[string]interface{}, error) {
 	ctx := context.Background()
 
@@ -266,6 +269,7 @@ func ResolveAffectedEndpoints(db database.DBConnection, name, version string) ([
 	return endpoints, nil
 }
 
+// ResolveAffectedReleases fetches releases affected by vulnerabilities of a specific severity.
 func ResolveAffectedReleases(db database.DBConnection, severity string) ([]interface{}, error) {
 	ctx := context.Background()
 	severityScore := util.GetSeverityScore(severity)

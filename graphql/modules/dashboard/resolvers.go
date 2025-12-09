@@ -1,3 +1,4 @@
+// Package dashboard implements the resolvers for dashboard metrics.
 package dashboard
 
 import (
@@ -14,7 +15,7 @@ import (
 // --- ADDED MISSING RESOLVERS (Mocks) ---
 
 // ResolveOverview handles fetching the high-level dashboard metrics
-func ResolveOverview(db database.DBConnection) (interface{}, error) {
+func ResolveOverview(_ database.DBConnection) (interface{}, error) {
 	// TODO: Replace with actual database query calculating these metrics
 	return map[string]interface{}{
 		"totalOpen":     142,
@@ -25,7 +26,7 @@ func ResolveOverview(db database.DBConnection) (interface{}, error) {
 }
 
 // ResolveSeverityDistribution fetches current breakdown of issues
-func ResolveSeverityDistribution(db database.DBConnection) (interface{}, error) {
+func ResolveSeverityDistribution(_ database.DBConnection) (interface{}, error) {
 	// TODO: Replace with actual database query for current severity snapshots
 	return map[string]interface{}{
 		"critical": 28,
@@ -36,7 +37,7 @@ func ResolveSeverityDistribution(db database.DBConnection) (interface{}, error) 
 }
 
 // ResolveTopRisks fetches the top risky assets based on type
-func ResolveTopRisks(db database.DBConnection, assetType string, limit int) (interface{}, error) {
+func ResolveTopRisks(_ database.DBConnection, _ string, limit int) (interface{}, error) {
 	// TODO: Replace with actual database query filtering by assetType
 	// Mock response
 	var risks []map[string]interface{}

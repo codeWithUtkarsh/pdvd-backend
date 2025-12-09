@@ -1,3 +1,4 @@
+// Package scorecard defines the GraphQL types for OpenSSF Scorecard results.
 package scorecard
 
 import (
@@ -5,6 +6,7 @@ import (
 	"github.com/ortelius/pdvd-backend/v12/model"
 )
 
+// ScorecardDocumentationType represents the documentation links for a check.
 var ScorecardDocumentationType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "ScorecardDocumentation",
 	Fields: graphql.Fields{
@@ -19,6 +21,7 @@ var ScorecardDocumentationType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// ScorecardCheckType represents an individual scorecard check result.
 var ScorecardCheckType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "ScorecardCheck",
 	Fields: graphql.Fields{
@@ -45,6 +48,7 @@ var ScorecardCheckType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// ScorecardRepoType represents the repository metadata in a scorecard result.
 var ScorecardRepoType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "ScorecardRepo",
 	Fields: graphql.Fields{
@@ -59,6 +63,7 @@ var ScorecardRepoType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// ScorecardScoresType represents the scoring metadata.
 var ScorecardScoresType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "ScorecardScores",
 	Fields: graphql.Fields{
@@ -73,6 +78,7 @@ var ScorecardScoresType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// ScorecardResultType represents the full OpenSSF Scorecard analysis result.
 var ScorecardResultType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "ScorecardResult",
 	Fields: graphql.Fields{

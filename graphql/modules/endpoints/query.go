@@ -1,3 +1,4 @@
+// Package endpoints defines the GraphQL queries for endpoint management.
 package endpoints
 
 import (
@@ -5,6 +6,7 @@ import (
 	"github.com/ortelius/pdvd-backend/v12/database"
 )
 
+// GetQueryFields returns the endpoint queries to be mounted in the root schema.
 func GetQueryFields(db database.DBConnection, syncedEndpointType *graphql.Object, endpointDetailsType *graphql.Object) graphql.Fields {
 	return graphql.Fields{
 		"syncedEndpoints": &graphql.Field{

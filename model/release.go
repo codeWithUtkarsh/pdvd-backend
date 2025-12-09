@@ -7,6 +7,7 @@ import (
 	"github.com/ortelius/pdvd-backend/v12/util"
 )
 
+// ProjectRelease represents a release object stored in the database.
 type ProjectRelease struct {
 	Key                      string                `json:"_key,omitempty"`
 	Cid                      string                `json:"cid,omitempty"`
@@ -55,6 +56,7 @@ type ProjectRelease struct {
 	PrevVersionVulnCount     int                   `json:"prev_version_vuln_count,omitempty"`
 }
 
+// ScorecardAPIResponse represents the JSON response from the OpenSSF Scorecard API.
 type ScorecardAPIResponse struct {
 	Date      string   `json:"date"`
 	Repo      Repo     `json:"repo"`
@@ -64,16 +66,19 @@ type ScorecardAPIResponse struct {
 	Metadata  []string `json:"metadata,omitempty"`
 }
 
+// Repo represents repository information in the Scorecard response.
 type Repo struct {
 	Name   string `json:"name"`
 	Commit string `json:"commit"`
 }
 
+// Scores represents scoring version information.
 type Scores struct {
 	Version string `json:"version"`
 	Commit  string `json:"commit"`
 }
 
+// Check represents a specific Scorecard check.
 type Check struct {
 	Name          string        `json:"name"`
 	Score         int           `json:"score"`
@@ -82,11 +87,13 @@ type Check struct {
 	Documentation Documentation `json:"documentation"`
 }
 
+// Documentation represents links to check documentation.
 type Documentation struct {
 	Short string `json:"short"`
 	URL   string `json:"url"`
 }
 
+// NewProjectRelease creates a new ProjectRelease with default values.
 func NewProjectRelease() *ProjectRelease {
 	return &ProjectRelease{
 		ObjType:               "ProjectRelease",
@@ -94,6 +101,7 @@ func NewProjectRelease() *ProjectRelease {
 	}
 }
 
+// ParseAndSetVersion parses the version string into semver components.
 func (r *ProjectRelease) ParseAndSetVersion() {
 	if r.Version == "" {
 		return

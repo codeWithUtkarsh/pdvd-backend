@@ -1,3 +1,4 @@
+// Package graphql provides the main schema construction and database initialization for the GraphQL API.
 package graphql
 
 import (

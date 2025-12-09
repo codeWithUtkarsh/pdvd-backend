@@ -1,3 +1,4 @@
+// Package endpoints implements the resolvers for endpoint data.
 package endpoints
 
 import (
@@ -19,6 +20,7 @@ func isVersionAffectedAny(version string, allAffected []models.Affected) bool {
 	return false
 }
 
+// ResolveEndpointDetails fetches detailed information for a specific endpoint.
 func ResolveEndpointDetails(db database.DBConnection, endpointName string) (map[string]interface{}, error) {
 	ctx := context.Background()
 
@@ -429,6 +431,7 @@ func ResolveEndpointDetails(db database.DBConnection, endpointName string) (map[
 	}, nil
 }
 
+// ResolveSyncedEndpoints fetches a list of endpoints that have been synced.
 func ResolveSyncedEndpoints(db database.DBConnection, limit int) ([]map[string]interface{}, error) {
 	ctx := context.Background()
 

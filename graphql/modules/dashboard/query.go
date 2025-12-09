@@ -1,3 +1,4 @@
+// Package dashboard defines the GraphQL queries for the dashboard.
 package dashboard
 
 import (
@@ -11,14 +12,14 @@ func GetQueryFields(db database.DBConnection) graphql.Fields {
 		// Section 1: Top Cards (Overview)
 		"dashboardOverview": &graphql.Field{
 			Type: DashboardOverviewType,
-			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			Resolve: func(_ graphql.ResolveParams) (interface{}, error) {
 				return ResolveOverview(db)
 			},
 		},
 		// Section 2: Charts (Severity)
 		"dashboardSeverity": &graphql.Field{
 			Type: SeverityDistributionType,
-			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
+			Resolve: func(_ graphql.ResolveParams) (interface{}, error) {
 				return ResolveSeverityDistribution(db)
 			},
 		},

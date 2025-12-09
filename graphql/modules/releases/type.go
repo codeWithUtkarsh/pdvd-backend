@@ -1,3 +1,4 @@
+// Package releases defines the GraphQL types for release management.
 package releases
 
 import (
@@ -9,6 +10,7 @@ import (
 	"github.com/ortelius/pdvd-backend/v12/model"
 )
 
+// SBOMType represents the Software Bill of Materials.
 var SBOMType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "SBOM",
 	Fields: graphql.Fields{
@@ -27,6 +29,7 @@ var SBOMType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// ReleaseInfoType represents summary information about a release.
 var ReleaseInfoType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "ReleaseInfo",
 	Fields: graphql.Fields{
@@ -35,6 +38,7 @@ var ReleaseInfoType = graphql.NewObject(graphql.ObjectConfig{
 	},
 })
 
+// AffectedReleaseType represents a release affected by a specific vulnerability.
 var AffectedReleaseType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "AffectedRelease",
 	Fields: graphql.Fields{
