@@ -62,14 +62,14 @@ scec-cli get myapp 1.0.0 --sbom-only --output sbom.json
 
 ## Install with Docker-Compose
 
-1. Install docker https://docs.docker.com/get-started/get-docker/
+1. Install docker <https://docs.docker.com/get-started/get-docker/>
 
-2. Clone frontend application 
+2. Clone frontend application
 ```bash
 git clone https://github.com/ortelius/pdvd-frontend
 ```
 
-3. Clone backend application 
+3. Clone backend application
 ```bash
 git clone https://github.com/ortelius/pdvd-backend
 ```

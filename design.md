@@ -27,11 +27,11 @@ By connecting vulnerability data with project releases, deployment locations, an
 
 **At Setup, Users Connect:**
 
-| Code Repository          | Binary Repository      | Deployment Infrastructure      | Issue Tracking               |
-|--------------------------|------------------------|--------------------------------|------------------------------|
-| GitHub/GitLab repos      | Quay, DockerHub        | Kubernetes clusters            | Jira, GitHub Issues          |
-| SBOMs & dependency files | ArtifactHub, Sonatype  | AWS/Azure/GCP endpoints        | GitLab Issues                |
-| Source code & commits    | JFrog, GitHub Packages | Edge devices, IoT, satellites  | AI Auto-remediation          |
+| Code Repository          | Binary Repository      | Deployment Infrastructure     | Issue Tracking      |
+|--------------------------|------------------------|-------------------------------|---------------------|
+| GitHub/GitLab repos      | Quay, DockerHub        | Kubernetes clusters           | Jira, GitHub Issues |
+| SBOMs & dependency files | ArtifactHub, Sonatype  | AWS/Azure/GCP endpoints       | GitLab Issues       |
+| Source code & commits    | JFrog, GitHub Packages | Edge devices, IoT, satellites | AI Auto-remediation |
 
 ## Functional Requirements
 
