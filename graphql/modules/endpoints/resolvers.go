@@ -20,7 +20,7 @@ func isVersionAffectedAny(version string, allAffected []models.Affected) bool {
 	return false
 }
 
-// ResolveEndpointDetails fetches detailed information for a specific endpoint.
+// ResolveEndpointDetails - returns detailed endpoint information with vulnerabilities
 func ResolveEndpointDetails(db database.DBConnection, endpointName string) (map[string]interface{}, error) {
 	ctx := context.Background()
 
@@ -254,64 +254,18 @@ func ResolveEndpointDetails(db database.DBConnection, endpointName string) (map[
 					}
 			)
 			
-			LET totalVulnerabilities = (
-				FOR release IN syncedReleases
-					FOR vuln IN release.vulnerabilities
-						RETURN {
-							severity_rating: vuln.severity_rating,
-							severity_score: vuln.severity_score
-						}
-			)
-			
-			LET criticalCount = LENGTH(
-				FOR v IN totalVulnerabilities
-					FILTER v.severity_rating == "CRITICAL"
-					RETURN 1
-			)
-			
-			LET highCount = LENGTH(
-				FOR v IN totalVulnerabilities
-					FILTER v.severity_rating == "HIGH"
-					RETURN 1
-			)
-			
-			LET mediumCount = LENGTH(
-				FOR v IN totalVulnerabilities
-					FILTER v.severity_rating == "MEDIUM"
-					RETURN 1
-			)
-			
-			LET lowCount = LENGTH(
-				FOR v IN totalVulnerabilities
-					FILTER v.severity_rating == "LOW"
-					RETURN 1
-			)
-			
-			LET totalDelta = SUM(
-				FOR release IN syncedReleases
-					FILTER release.vulnerability_count_delta != null
-					RETURN release.vulnerability_count_delta
-			)
-			
-			LET latestSyncTime = MAX(
-				FOR release IN syncedReleases
-					RETURN release.last_sync
-			)
-			
 			RETURN {
 				endpoint_name: endpoint.name,
 				endpoint_url: endpoint.name,
 				endpoint_type: endpoint.endpoint_type,
 				environment: endpoint.environment,
 				status: "active",
-				last_sync: latestSyncTime,
-				total_vulnerabilities: {
-					critical: criticalCount,
-					high: highCount,
-					medium: mediumCount,
-					low: lowCount
-				},
-				vulnerability_count_delta: totalDelta,
+				last_sync: MAX(FOR r IN syncedReleases RETURN r.last_sync),
+				vulnerability_count_delta: SUM(
+					FOR r IN syncedReleases
+						FILTER r.vulnerability_count_delta != null
+						RETURN r.vulnerability_count_delta
+				),
 				releases: syncedReleases
 			}
 	`
@@ -350,15 +304,14 @@ func ResolveEndpointDetails(db database.DBConnection, endpointName string) (map[
 	}
 
 	type EndpointDetailsResult struct {
-		EndpointName            string         `json:"endpoint_name"`
-		EndpointURL             string         `json:"endpoint_url"`
-		EndpointType            string         `json:"endpoint_type"`
-		Environment             string         `json:"environment"`
-		Status                  string         `json:"status"`
-		LastSync                string         `json:"last_sync"`
-		TotalVulnerabilities    map[string]int `json:"total_vulnerabilities"`
-		VulnerabilityCountDelta int            `json:"vulnerability_count_delta"`
-		Releases                []ReleaseData  `json:"releases"`
+		EndpointName            string        `json:"endpoint_name"`
+		EndpointURL             string        `json:"endpoint_url"`
+		EndpointType            string        `json:"endpoint_type"`
+		Environment             string        `json:"environment"`
+		Status                  string        `json:"status"`
+		LastSync                string        `json:"last_sync"`
+		VulnerabilityCountDelta int           `json:"vulnerability_count_delta"`
+		Releases                []ReleaseData `json:"releases"`
 	}
 
 	if !cursor.HasMore() {
@@ -371,12 +324,16 @@ func ResolveEndpointDetails(db database.DBConnection, endpointName string) (map[
 		return nil, err
 	}
 
+	// Apply Go-side validation and deduplication
+	var allValidatedVulns []map[string]interface{}
 	var processedReleases []map[string]interface{}
+
 	for _, release := range result.Releases {
 		var processedVulns []map[string]interface{}
 		seen := make(map[string]bool)
 
 		for _, vuln := range release.Vulnerabilities {
+			// Apply validation filtering
 			if vuln.NeedsValidation && len(vuln.AllAffected) > 0 {
 				if !isVersionAffectedAny(vuln.AffectedVersion, vuln.AllAffected) {
 					continue
@@ -404,6 +361,12 @@ func ResolveEndpointDetails(db database.DBConnection, endpointName string) (map[
 			}
 
 			processedVulns = append(processedVulns, processedVuln)
+
+			// Track for severity counting (deduplicate by CVE ID only)
+			allValidatedVulns = append(allValidatedVulns, map[string]interface{}{
+				"cve_id":          vuln.CveID,
+				"severity_rating": vuln.SeverityRating,
+			})
 		}
 
 		processedReleases = append(processedReleases, map[string]interface{}{
@@ -418,6 +381,35 @@ func ResolveEndpointDetails(db database.DBConnection, endpointName string) (map[
 		})
 	}
 
+	// Count by severity AFTER validation, with deduplication by CVE ID
+	seenCves := make(map[string]string) // cve_id -> severity_rating
+	for _, vuln := range allValidatedVulns {
+		cveID := vuln["cve_id"].(string)
+		if _, exists := seenCves[cveID]; !exists {
+			seenCves[cveID] = vuln["severity_rating"].(string)
+		}
+	}
+
+	severityCounts := map[string]int{
+		"critical": 0,
+		"high":     0,
+		"medium":   0,
+		"low":      0,
+	}
+
+	for _, rating := range seenCves {
+		switch rating {
+		case "CRITICAL":
+			severityCounts["critical"]++
+		case "HIGH":
+			severityCounts["high"]++
+		case "MEDIUM":
+			severityCounts["medium"]++
+		case "LOW":
+			severityCounts["low"]++
+		}
+	}
+
 	return map[string]interface{}{
 		"endpoint_name":             result.EndpointName,
 		"endpoint_url":              result.EndpointURL,
@@ -425,7 +417,7 @@ func ResolveEndpointDetails(db database.DBConnection, endpointName string) (map[
 		"environment":               result.Environment,
 		"status":                    result.Status,
 		"last_sync":                 result.LastSync,
-		"total_vulnerabilities":     result.TotalVulnerabilities,
+		"total_vulnerabilities":     severityCounts,
 		"vulnerability_count_delta": result.VulnerabilityCountDelta,
 		"releases":                  processedReleases,
 	}, nil
@@ -440,10 +432,33 @@ func ResolveSyncedEndpoints(db database.DBConnection, limit int) ([]map[string]i
 			LET syncedReleases = (
 				FOR sync IN sync
 					FILTER sync.endpoint_name == endpoint.name
-					COLLECT releaseName = sync.release_name, releaseVersion = sync.release_version
+					COLLECT releaseName = sync.release_name INTO groupedSyncs = sync
+					
+					LET latestSync = (
+						FOR s IN groupedSyncs
+							SORT s.release_version_major != null ? s.release_version_major : -1 DESC,
+								s.release_version_minor != null ? s.release_version_minor : -1 DESC,
+								s.release_version_patch != null ? s.release_version_patch : -1 DESC,
+								s.release_version_prerelease != null && s.release_version_prerelease != "" ? 1 : 0 ASC,
+								s.release_version_prerelease ASC,
+								s.release_version DESC
+							LIMIT 1
+							RETURN s
+					)[0]
+					
+					LET releaseDoc = (
+						FOR r IN release
+							FILTER r.name == latestSync.release_name AND r.version == latestSync.release_version
+							LIMIT 1
+							RETURN r
+					)[0]
+					
+					FILTER releaseDoc != null
+					
 					RETURN {
-						release_name: releaseName,
-						release_version: releaseVersion
+						release_name: releaseDoc.name,
+						release_version: releaseDoc.version,
+						release_id: releaseDoc._id
 					}
 			)
 			
@@ -459,88 +474,68 @@ func ResolveSyncedEndpoints(db database.DBConnection, limit int) ([]map[string]i
 			
 			LET allVulnerabilities = (
 				FOR releaseInfo IN syncedReleases
-					FOR release IN release
-						FILTER release.name == releaseInfo.release_name AND release.version == releaseInfo.release_version
-						LIMIT 1
-						
-						FOR sbom IN 1..1 OUTBOUND release release2sbom
-							FOR sbomEdge IN sbom2purl
-								FILTER sbomEdge._from == sbom._id
-								LET purl = DOCUMENT(sbomEdge._to)
-								FILTER purl != null
+					LET release = DOCUMENT(releaseInfo.release_id)
+					FILTER release != null
+					
+					FOR sbom IN 1..1 OUTBOUND release release2sbom
+						FOR sbomEdge IN sbom2purl
+							FILTER sbomEdge._from == sbom._id
+							LET purl = DOCUMENT(sbomEdge._to)
+							FILTER purl != null
+							
+							FOR cveEdge IN cve2purl
+								FILTER cveEdge._to == purl._id
 								
-								FOR cveEdge IN cve2purl
-									FILTER cveEdge._to == purl._id
-									
-									FILTER (
-										sbomEdge.version_major != null AND 
-										cveEdge.introduced_major != null AND 
-										(cveEdge.fixed_major != null OR cveEdge.last_affected_major != null)
-									) ? (
-										(sbomEdge.version_major > cveEdge.introduced_major OR
-										(sbomEdge.version_major == cveEdge.introduced_major AND 
-										sbomEdge.version_minor > cveEdge.introduced_minor) OR
-										(sbomEdge.version_major == cveEdge.introduced_major AND 
-										sbomEdge.version_minor == cveEdge.introduced_minor AND 
-										sbomEdge.version_patch >= cveEdge.introduced_patch))
-										AND
-										(cveEdge.fixed_major != null ? (
-											sbomEdge.version_major < cveEdge.fixed_major OR
-											(sbomEdge.version_major == cveEdge.fixed_major AND 
-											sbomEdge.version_minor < cveEdge.fixed_minor) OR
-											(sbomEdge.version_major == cveEdge.fixed_major AND 
-											sbomEdge.version_minor == cveEdge.fixed_minor AND 
-											sbomEdge.version_patch < cveEdge.fixed_patch)
-										) : (
-											sbomEdge.version_major < cveEdge.last_affected_major OR
-											(sbomEdge.version_major == cveEdge.last_affected_major AND 
-											sbomEdge.version_minor < cveEdge.last_affected_minor) OR
-											(sbomEdge.version_major == cveEdge.last_affected_major AND 
-											sbomEdge.version_minor == cveEdge.last_affected_minor AND 
-											sbomEdge.version_patch <= cveEdge.last_affected_patch)
-										))
-									) : true
-									
-									LET cve = DOCUMENT(cveEdge._from)
-									FILTER cve != null
-									
-									LET matchedAffected = (
-										FOR affected IN cve.affected != null ? cve.affected : []
-											LET cveBasePurl = affected.package.purl != null ? 
-												affected.package.purl : 
-												CONCAT("pkg:", LOWER(affected.package.ecosystem), "/", affected.package.name)
-											FILTER cveBasePurl == purl.purl
-											RETURN affected
-									)
-									FILTER LENGTH(matchedAffected) > 0
-									
-									RETURN {
-										severity_rating: cve.database_specific.severity_rating
-									}
-			)
-			
-			LET criticalCount = LENGTH(
-				FOR v IN allVulnerabilities
-					FILTER v.severity_rating == "CRITICAL"
-					RETURN 1
-			)
-			
-			LET highCount = LENGTH(
-				FOR v IN allVulnerabilities
-					FILTER v.severity_rating == "HIGH"
-					RETURN 1
-			)
-			
-			LET mediumCount = LENGTH(
-				FOR v IN allVulnerabilities
-					FILTER v.severity_rating == "MEDIUM"
-					RETURN 1
-			)
-			
-			LET lowCount = LENGTH(
-				FOR v IN allVulnerabilities
-					FILTER v.severity_rating == "LOW"
-					RETURN 1
+								FILTER (
+									sbomEdge.version_major != null AND 
+									cveEdge.introduced_major != null AND 
+									(cveEdge.fixed_major != null OR cveEdge.last_affected_major != null)
+								) ? (
+									(sbomEdge.version_major > cveEdge.introduced_major OR
+									(sbomEdge.version_major == cveEdge.introduced_major AND 
+									sbomEdge.version_minor > cveEdge.introduced_minor) OR
+									(sbomEdge.version_major == cveEdge.introduced_major AND 
+									sbomEdge.version_minor == cveEdge.introduced_minor AND 
+									sbomEdge.version_patch >= cveEdge.introduced_patch))
+									AND
+									(cveEdge.fixed_major != null ? (
+										sbomEdge.version_major < cveEdge.fixed_major OR
+										(sbomEdge.version_major == cveEdge.fixed_major AND 
+										sbomEdge.version_minor < cveEdge.fixed_minor) OR
+										(sbomEdge.version_major == cveEdge.fixed_major AND 
+										sbomEdge.version_minor == cveEdge.fixed_minor AND 
+										sbomEdge.version_patch < cveEdge.fixed_patch)
+									) : (
+										sbomEdge.version_major < cveEdge.last_affected_major OR
+										(sbomEdge.version_major == cveEdge.last_affected_major AND 
+										sbomEdge.version_minor < cveEdge.last_affected_minor) OR
+										(sbomEdge.version_major == cveEdge.last_affected_major AND 
+										sbomEdge.version_minor == cveEdge.last_affected_minor AND 
+										sbomEdge.version_patch <= cveEdge.last_affected_patch)
+									))
+								) : true
+								
+								LET cve = DOCUMENT(cveEdge._from)
+								FILTER cve != null
+								
+								LET matchedAffected = (
+									FOR affected IN cve.affected != null ? cve.affected : []
+										LET cveBasePurl = affected.package.purl != null ? 
+											affected.package.purl : 
+											CONCAT("pkg:", LOWER(affected.package.ecosystem), "/", affected.package.name)
+										FILTER cveBasePurl == purl.purl
+										RETURN affected
+								)
+								FILTER LENGTH(matchedAffected) > 0
+								
+								RETURN {
+									cve_id: cve.id,
+									severity_rating: cve.database_specific.severity_rating,
+									package: purl.purl,
+									affected_version: sbomEdge.version,
+									all_affected: matchedAffected,
+									needs_validation: sbomEdge.version_major == null OR cveEdge.introduced_major == null
+								}
 			)
 			
 			LIMIT @limit
@@ -553,13 +548,14 @@ func ResolveSyncedEndpoints(db database.DBConnection, limit int) ([]map[string]i
 				status: "active",
 				last_sync: latestSync,
 				release_count: releaseCount,
-				total_vulnerabilities: {
-					critical: criticalCount,
-					high: highCount,
-					medium: mediumCount,
-					low: lowCount
-				},
-				releases: syncedReleases
+				releases: (
+					FOR r IN syncedReleases
+						RETURN {
+							release_name: r.release_name,
+							release_version: r.release_version
+						}
+				),
+				all_vulnerabilities: allVulnerabilities
 			}
 	`
 
@@ -573,13 +569,86 @@ func ResolveSyncedEndpoints(db database.DBConnection, limit int) ([]map[string]i
 	}
 	defer cursor.Close()
 
+	// Struct to match the extended AQL return data
+	type SyncedVulnMatch struct {
+		CveID           string            `json:"cve_id"`
+		SeverityRating  string            `json:"severity_rating"`
+		Package         string            `json:"package"`
+		AffectedVersion string            `json:"affected_version"`
+		AllAffected     []models.Affected `json:"all_affected"`
+		NeedsValidation bool              `json:"needs_validation"`
+	}
+
+	type EndpointResult struct {
+		EndpointName       string                   `json:"endpoint_name"`
+		EndpointURL        string                   `json:"endpoint_url"`
+		EndpointType       string                   `json:"endpoint_type"`
+		Environment        string                   `json:"environment"`
+		Status             string                   `json:"status"`
+		LastSync           string                   `json:"last_sync"`
+		ReleaseCount       int                      `json:"release_count"`
+		Releases           []map[string]interface{} `json:"releases"`
+		AllVulnerabilities []SyncedVulnMatch        `json:"all_vulnerabilities"`
+	}
+
 	var endpoints []map[string]interface{}
 	for cursor.HasMore() {
-		var endpoint map[string]interface{}
-		_, err := cursor.ReadDocument(ctx, &endpoint)
+		var result EndpointResult
+		_, err := cursor.ReadDocument(ctx, &result)
 		if err != nil {
 			continue
 		}
+
+		// Apply Go-side validation and deduplication
+		seenCves := make(map[string]string) // cve_id -> severity_rating
+
+		for _, vuln := range result.AllVulnerabilities {
+			// 1. Validation Logic
+			if vuln.NeedsValidation && len(vuln.AllAffected) > 0 {
+				if !isVersionAffectedAny(vuln.AffectedVersion, vuln.AllAffected) {
+					continue
+				}
+			}
+
+			// 2. Deduplication Logic (Only keep unique CVEs for this endpoint)
+			if _, exists := seenCves[vuln.CveID]; !exists {
+				seenCves[vuln.CveID] = vuln.SeverityRating
+			}
+		}
+
+		// 3. Count by severity
+		severityCounts := map[string]int{
+			"critical": 0,
+			"high":     0,
+			"medium":   0,
+			"low":      0,
+		}
+
+		for _, rating := range seenCves {
+			switch rating {
+			case "CRITICAL":
+				severityCounts["critical"]++
+			case "HIGH":
+				severityCounts["high"]++
+			case "MEDIUM":
+				severityCounts["medium"]++
+			case "LOW":
+				severityCounts["low"]++
+			}
+		}
+
+		endpoint := map[string]interface{}{
+			"endpoint_name":         result.EndpointName,
+			"endpoint_url":          result.EndpointURL,
+			"endpoint_type":         result.EndpointType,
+			"environment":           result.Environment,
+			"status":                result.Status,
+			"last_sync":             result.LastSync,
+			"release_count":         result.ReleaseCount,
+			"total_vulnerabilities": severityCounts,
+			"releases":              result.Releases,
+		}
+
 		endpoints = append(endpoints, endpoint)
 	}
 
