@@ -1039,12 +1039,12 @@ func PostSyncWithEndpoint(c *fiber.Ctx) error {
 		}
 
 		type releaseMetadata struct {
-			name              string
-			version           string
-			versionMajor      *int
-			versionMinor      *int
-			versionPatch      *int
-			versionPrerelease string
+			Name              string `json:"name"`
+			Version           string `json:"version"`
+			VersionMajor      *int   `json:"version_major"`
+			VersionMinor      *int   `json:"version_minor"`
+			VersionPatch      *int   `json:"version_patch"`
+			VersionPrerelease string `json:"version_prerelease"`
 		}
 
 		var relMeta releaseMetadata
@@ -1056,31 +1056,31 @@ func PostSyncWithEndpoint(c *fiber.Ctx) error {
 
 		// Create sync record
 		sync := map[string]interface{}{
-			"release_name":    relMeta.name,
-			"release_version": relMeta.version,
+			"release_name":    relMeta.Name,
+			"release_version": relMeta.Version,
 			"endpoint_name":   req.EndpointName,
 			"synced_at":       syncedAt,
 			"objtype":         "Sync",
 		}
 
-		if relMeta.versionMajor != nil {
-			sync["release_version_major"] = *relMeta.versionMajor
+		if relMeta.VersionMajor != nil {
+			sync["release_version_major"] = *relMeta.VersionMajor
 		}
-		if relMeta.versionMinor != nil {
-			sync["release_version_minor"] = *relMeta.versionMinor
+		if relMeta.VersionMinor != nil {
+			sync["release_version_minor"] = *relMeta.VersionMinor
 		}
-		if relMeta.versionPatch != nil {
-			sync["release_version_patch"] = *relMeta.versionPatch
+		if relMeta.VersionPatch != nil {
+			sync["release_version_patch"] = *relMeta.VersionPatch
 		}
-		if relMeta.versionPrerelease != "" {
-			sync["release_version_prerelease"] = relMeta.versionPrerelease
+		if relMeta.VersionPrerelease != "" {
+			sync["release_version_prerelease"] = relMeta.VersionPrerelease
 		}
 
 		syncMeta, err := db.Collections["sync"].CreateDocument(ctx, sync)
 		if err != nil {
 			// Update result with error if this was a processed release
 			for i := range results {
-				if results[i].name == relMeta.name && results[i].version == relMeta.version {
+				if results[i].name == relMeta.Name && results[i].version == relMeta.Version {
 					results[i].status = "error"
 					results[i].message = fmt.Sprintf("Failed to save sync: %s", err.Error())
 				}
@@ -1093,7 +1093,7 @@ func PostSyncWithEndpoint(c *fiber.Ctx) error {
 
 		// Update result with sync key if this was a processed release
 		for i := range results {
-			if results[i].name == relMeta.name && results[i].version == relMeta.version && results[i].status != "unchanged" {
+			if results[i].name == relMeta.Name && results[i].version == relMeta.Version && results[i].status != "unchanged" {
 				results[i].syncKey = syncMeta.Key
 			}
 		}
