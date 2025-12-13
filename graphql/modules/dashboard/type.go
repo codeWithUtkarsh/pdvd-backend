@@ -73,78 +73,76 @@ var DashboardGlobalStatusType = graphql.NewObject(graphql.ObjectConfig{
 })
 
 // ============================================================================
-// MTTR Types
+// MTTR & Advanced Metrics Types
 // ============================================================================
 
-// MTTRBySeverityType represents MTTR metrics for a specific severity level
-var MTTRBySeverityType = graphql.NewObject(graphql.ObjectConfig{
-	Name: "MTTRBySeverity",
+// ExecutiveSummaryType implements Section G: Executive Summary Block
+var ExecutiveSummaryType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "ExecutiveSummary",
 	Fields: graphql.Fields{
-		"severity":    &graphql.Field{Type: graphql.String},
-		"mean_days":   &graphql.Field{Type: graphql.Float},
-		"median_days": &graphql.Field{Type: graphql.Float},
-		"min_days":    &graphql.Field{Type: graphql.Float},
-		"max_days":    &graphql.Field{Type: graphql.Float},
-		"sample_size": &graphql.Field{Type: graphql.Int},
+		"total_new_cves":            &graphql.Field{Type: graphql.Int},   // Section D.1
+		"total_fixed_cves":          &graphql.Field{Type: graphql.Int},   // Section D.2
+		"post_deployment_cves":      &graphql.Field{Type: graphql.Int},   // Section E.2 (Total)
+		"mttr_all":                  &graphql.Field{Type: graphql.Float}, // Section A.1
+		"mttr_post_deployment":      &graphql.Field{Type: graphql.Float}, // Section A.3
+		"mean_open_age_all":         &graphql.Field{Type: graphql.Float}, // Section B.1
+		"mean_open_age_post_deploy": &graphql.Field{Type: graphql.Float}, // Section B.3
+		"open_cves_beyond_sla_pct":  &graphql.Field{Type: graphql.Float}, // Section C.1
+		"oldest_open_critical_days": &graphql.Field{Type: graphql.Float}, // Section B.4
+		"backlog_delta":             &graphql.Field{Type: graphql.Int},   // Section D.3
 	},
 })
 
-// MTTRAnalysisType represents the complete MTTR analysis
+// DetailedSeverityMetricsType implements Sections A, B, C, D broken down by severity
+var DetailedSeverityMetricsType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "DetailedSeverityMetrics",
+	Fields: graphql.Fields{
+		"severity": &graphql.Field{Type: graphql.String},
+
+		// A. Remediation Effectiveness
+		"mttr":                 &graphql.Field{Type: graphql.Float}, // A.2
+		"mttr_post_deployment": &graphql.Field{Type: graphql.Float}, // A.3 (by severity)
+		"fixed_within_sla_pct": &graphql.Field{Type: graphql.Float}, // C.2
+
+		// B. Active Risk Exposure
+		"mean_open_age":             &graphql.Field{Type: graphql.Float}, // B.2
+		"mean_open_age_post_deploy": &graphql.Field{Type: graphql.Float}, // B.3 (by severity)
+		"oldest_open_days":          &graphql.Field{Type: graphql.Float}, // B.4
+
+		// C. SLA Compliance
+		"open_beyond_sla_pct": &graphql.Field{Type: graphql.Float}, // C.1
+
+		// D. Volume & Flow
+		"new_detected":  &graphql.Field{Type: graphql.Int}, // D.1
+		"remediated":    &graphql.Field{Type: graphql.Int}, // D.2
+		"backlog_count": &graphql.Field{Type: graphql.Int}, // Current Open Count
+	},
+})
+
+// EndpointImpactCountType helps implement Section E.2
+var EndpointImpactCountType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "EndpointImpactCount",
+	Fields: graphql.Fields{
+		"type":  &graphql.Field{Type: graphql.String}, // e.g., "mission_asset", "cluster"
+		"count": &graphql.Field{Type: graphql.Int},
+	},
+})
+
+// EndpointImpactMetricsType implements Section E: Endpoint Impact Metrics
+var EndpointImpactMetricsType = graphql.NewObject(graphql.ObjectConfig{
+	Name: "EndpointImpactMetrics",
+	Fields: graphql.Fields{
+		"affected_endpoints_count":     &graphql.Field{Type: graphql.Int},                              // E.1
+		"post_deployment_cves_by_type": &graphql.Field{Type: graphql.NewList(EndpointImpactCountType)}, // E.2
+	},
+})
+
+// MTTRAnalysisType is the root container for the Dashboard Metrics response
 var MTTRAnalysisType = graphql.NewObject(graphql.ObjectConfig{
 	Name: "MTTRAnalysis",
 	Fields: graphql.Fields{
-		"by_severity":       &graphql.Field{Type: graphql.NewList(MTTRBySeverityType)},
-		"overall_mean_days": &graphql.Field{Type: graphql.Float},
-		"analysis_period":   &graphql.Field{Type: graphql.Int},
-		"total_remediated":  &graphql.Field{Type: graphql.Int},
-	},
-})
-
-// MTTRTrendPointType represents a single point in MTTR trend over time
-var MTTRTrendPointType = graphql.NewObject(graphql.ObjectConfig{
-	Name: "MTTRTrendPoint",
-	Fields: graphql.Fields{
-		"month":    &graphql.Field{Type: graphql.String},
-		"avg_mttr": &graphql.Field{Type: graphql.Float},
-		"count":    &graphql.Field{Type: graphql.Int},
-	},
-})
-
-// MTTRByEndpointType represents MTTR metrics per endpoint
-var MTTRByEndpointType = graphql.NewObject(graphql.ObjectConfig{
-	Name: "MTTRByEndpoint",
-	Fields: graphql.Fields{
-		"endpoint_name": &graphql.Field{Type: graphql.String},
-		"avg_mttr":      &graphql.Field{Type: graphql.Float},
-		"count":         &graphql.Field{Type: graphql.Int},
-	},
-})
-
-// MTTRByPackageType represents MTTR metrics per package
-var MTTRByPackageType = graphql.NewObject(graphql.ObjectConfig{
-	Name: "MTTRByPackage",
-	Fields: graphql.Fields{
-		"package":  &graphql.Field{Type: graphql.String},
-		"avg_mttr": &graphql.Field{Type: graphql.Float},
-		"count":    &graphql.Field{Type: graphql.Int},
-	},
-})
-
-// MTTRDisclosureStatsType represents MTTR stats for a disclosure type
-var MTTRDisclosureStatsType = graphql.NewObject(graphql.ObjectConfig{
-	Name: "MTTRDisclosureStats",
-	Fields: graphql.Fields{
-		"count":       &graphql.Field{Type: graphql.Int},
-		"mean_mttr":   &graphql.Field{Type: graphql.Float},
-		"median_mttr": &graphql.Field{Type: graphql.Float},
-	},
-})
-
-// MTTRByDisclosureType represents MTTR comparison by disclosure timing
-var MTTRByDisclosureType = graphql.NewObject(graphql.ObjectConfig{
-	Name: "MTTRByDisclosure",
-	Fields: graphql.Fields{
-		"known_at_deployment":        &graphql.Field{Type: MTTRDisclosureStatsType},
-		"disclosed_after_deployment": &graphql.Field{Type: MTTRDisclosureStatsType},
+		"executive_summary": &graphql.Field{Type: ExecutiveSummaryType},
+		"by_severity":       &graphql.Field{Type: graphql.NewList(DetailedSeverityMetricsType)},
+		"endpoint_impact":   &graphql.Field{Type: EndpointImpactMetricsType},
 	},
 })

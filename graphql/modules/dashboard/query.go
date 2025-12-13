@@ -63,67 +63,16 @@ func GetQueryFields(db database.DBConnection) graphql.Fields {
 		// MTTR Analysis Queries
 		// ====================================================================
 
-		// MTTR Analysis by Severity
+		// MTTR & Backlog Analysis by Severity
 		"dashboardMTTR": &graphql.Field{
 			Type: MTTRAnalysisType,
 			Args: graphql.FieldConfigArgument{
-				"days": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 90},
-			},
-			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-				days := p.Args["days"].(int)
-				return ResolveMTTR(db, days)
-			},
-		},
-
-		// MTTR Trend Over Time (Monthly)
-		"dashboardMTTRTrend": &graphql.Field{
-			Type: graphql.NewList(MTTRTrendPointType),
-			Args: graphql.FieldConfigArgument{
+				// Default 180 days matches "Rolling 180-day MTTR" from dashboard-layout.md
 				"days": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 180},
 			},
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 				days := p.Args["days"].(int)
-				return ResolveMTTRTrend(db, days)
-			},
-		},
-
-		// MTTR By Endpoint (fastest/slowest to remediate)
-		"dashboardMTTRByEndpoint": &graphql.Field{
-			Type: graphql.NewList(MTTRByEndpointType),
-			Args: graphql.FieldConfigArgument{
-				"days":  &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 90},
-				"limit": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 10},
-			},
-			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-				days := p.Args["days"].(int)
-				limit := p.Args["limit"].(int)
-				return ResolveMTTRByEndpoint(db, days, limit)
-			},
-		},
-
-		// MTTR By Package (which packages take longest to fix)
-		"dashboardMTTRByPackage": &graphql.Field{
-			Type: graphql.NewList(MTTRByPackageType),
-			Args: graphql.FieldConfigArgument{
-				"days":  &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 90},
-				"limit": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 10},
-			},
-			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-				days := p.Args["days"].(int)
-				limit := p.Args["limit"].(int)
-				return ResolveMTTRByPackage(db, days, limit)
-			},
-		},
-
-		// MTTR By Disclosure Type (known at deployment vs. disclosed after)
-		"dashboardMTTRByDisclosureType": &graphql.Field{
-			Type: MTTRByDisclosureType,
-			Args: graphql.FieldConfigArgument{
-				"days": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 90},
-			},
-			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
-				days := p.Args["days"].(int)
-				return ResolveMTTRByDisclosureType(db, days)
+				return ResolveMTTR(db, days)
 			},
 		},
 	}

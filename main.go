@@ -17,6 +17,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	fiberrecover "github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/google/osv-scanner/pkg/models"
 	"github.com/graphql-go/graphql"
 	"github.com/ortelius/pdvd-backend/v12/database"
 	gqlschema "github.com/ortelius/pdvd-backend/v12/graphql"
@@ -623,13 +624,13 @@ func getCVEsForReleaseTracking(ctx context.Context, releaseName, releaseVersion 
 	defer cursor.Close()
 
 	type VulnRaw struct {
-		CveID           string        `json:"cve_id"`
-		SeverityRating  string        `json:"severity_rating"`
-		SeverityScore   float64       `json:"severity_score"`
-		Package         string        `json:"package"`
-		AffectedVersion string        `json:"affected_version"`
-		AllAffected     []interface{} `json:"all_affected"`
-		NeedsValidation bool          `json:"needs_validation"`
+		CveID           string            `json:"cve_id"`
+		SeverityRating  string            `json:"severity_rating"`
+		SeverityScore   float64           `json:"severity_score"`
+		Package         string            `json:"package"`
+		AffectedVersion string            `json:"affected_version"`
+		AllAffected     []models.Affected `json:"all_affected"`
+		NeedsValidation bool              `json:"needs_validation"`
 	}
 
 	result := make(map[string]CVEInfoTracking)
@@ -646,10 +647,20 @@ func getCVEsForReleaseTracking(ctx context.Context, releaseName, releaseVersion 
 	}
 
 	for _, v := range vulns {
-		// Simplified validation - in production, use isVersionAffectedAny
+		// --- VALIDATION LOGIC ADDED HERE ---
+		// If AQL couldn't definitively match (NeedsValidation is true),
+		// we MUST check the exact version range in Go.
 		if v.NeedsValidation && len(v.AllAffected) > 0 {
-			// Skip validation for tracking purposes - be conservative
-			// In production, implement full validation
+			isAffected := false
+			for _, affected := range v.AllAffected {
+				if util.IsVersionAffected(v.AffectedVersion, affected) {
+					isAffected = true
+					break
+				}
+			}
+			if !isAffected {
+				continue // Skip this CVE, it's a false positive from AQL
+			}
 		}
 
 		key := v.CveID + ":" + v.Package
@@ -770,6 +781,13 @@ func GraphQLHandler(schema graphql.Schema) fiber.Handler {
 				},
 			})
 		}
+
+		// Set Operation Name for Logger
+		opName := params.OperationName
+		if opName == "" {
+			opName = "-"
+		}
+		c.Locals("graphql_op", opName)
 
 		result := graphql.Do(graphql.Params{
 			Schema:         schema,
@@ -1709,7 +1727,17 @@ func main() {
 
 	// Middleware
 	app.Use(fiberrecover.New())
-	app.Use(logger.New())
+
+	// Default GraphQL Operation Name to "-" to handle OPTIONS/other requests gracefully
+	app.Use(func(c *fiber.Ctx) error {
+		c.Locals("graphql_op", "-")
+		return c.Next()
+	})
+
+	// Custom Logger Config to include GraphQL Operation Name
+	app.Use(logger.New(logger.Config{
+		Format: "${time} | ${status} | ${latency} | ${ip} | ${method} | ${path} | ${locals:graphql_op} | ${error}\n",
+	}))
 	app.Use(cors.New())
 
 	// Health check endpoint
