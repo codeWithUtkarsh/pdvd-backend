@@ -191,7 +191,7 @@ func InitializeDatabase() DBConnection {
 	// Edge collection creation
 	//
 
-	edgeCollectionNames := []string{"release2sbom", "sbom2purl", "cve2purl"}
+	edgeCollectionNames := []string{"release2sbom", "sbom2purl", "cve2purl", "release2cve"}
 
 	for _, edgeCollectionName := range edgeCollectionNames {
 		var col arangodb.Collection
@@ -278,6 +278,10 @@ func InitializeDatabase() DBConnection {
 		{Collection: "cve2purl", IdxName: "cve2purl_fixed_major", IdxField: "fixed_major"},
 		{Collection: "cve2purl", IdxName: "cve2purl_fixed_minor", IdxField: "fixed_minor"},
 		{Collection: "cve2purl", IdxName: "cve2purl_ecosystem", IdxField: "ecosystem"},
+
+		// release2cve indexes - Materialized edges for fast lookup
+		{Collection: "release2cve", IdxName: "release2cve_from", IdxField: "_from"},
+		{Collection: "release2cve", IdxName: "release2cve_to", IdxField: "_to"},
 
 		// CVE Lifecycle collection indexes for MTTR queries
 		{Collection: "cve_lifecycle", IdxName: "lifecycle_cve_id", IdxField: "cve_id"},

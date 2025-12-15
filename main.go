@@ -430,6 +430,156 @@ func deleteRelease2SBOMEdges(ctx context.Context, releaseID string) error {
 	return nil
 }
 
+// deleteRelease2CVEEdges deletes all existing release2cve edges for a given release
+func deleteRelease2CVEEdges(ctx context.Context, releaseID string) error {
+	query := `
+		FOR e IN release2cve
+			FILTER e._from == @releaseID
+			REMOVE e IN release2cve
+	`
+	bindVars := map[string]interface{}{
+		"releaseID": releaseID,
+	}
+
+	_, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
+		BindVars: bindVars,
+	})
+	return err
+}
+
+// linkReleaseToExistingCVEs finds matching CVEs for a release and creates materialized edges
+// This performs the "Write-Time" calculation so "Read-Time" queries are instant.
+func linkReleaseToExistingCVEs(ctx context.Context, releaseID, releaseKey string) error {
+	// 1. Query candidates using the Robust AQL Filter
+	// This finds all potential matches, including those needing Go-side validation
+	query := `
+		FOR r IN release
+			FILTER r._key == @releaseKey
+			
+			FOR sbom IN 1..1 OUTBOUND r release2sbom
+				FOR sbomEdge IN sbom2purl
+					FILTER sbomEdge._from == sbom._id
+					LET purl = DOCUMENT(sbomEdge._to)
+					FILTER purl != null
+					
+					FOR cveEdge IN cve2purl
+						FILTER cveEdge._to == purl._id
+						
+						// ROBUST AQL FILTER
+						FILTER (
+							sbomEdge.version_major != null AND 
+							cveEdge.introduced_major != null AND 
+							(cveEdge.fixed_major != null OR cveEdge.last_affected_major != null)
+						) ? (
+							(sbomEdge.version_major > cveEdge.introduced_major OR
+							(sbomEdge.version_major == cveEdge.introduced_major AND 
+							sbomEdge.version_minor > cveEdge.introduced_minor) OR
+							(sbomEdge.version_major == cveEdge.introduced_major AND 
+							sbomEdge.version_minor == cveEdge.introduced_minor AND 
+							sbomEdge.version_patch >= cveEdge.introduced_patch))
+							AND
+							(cveEdge.fixed_major != null ? (
+								sbomEdge.version_major < cveEdge.fixed_major OR
+								(sbomEdge.version_major == cveEdge.fixed_major AND 
+								sbomEdge.version_minor < cveEdge.fixed_minor) OR
+								(sbomEdge.version_major == cveEdge.fixed_major AND 
+								sbomEdge.version_minor == cveEdge.fixed_minor AND 
+								sbomEdge.version_patch < cveEdge.fixed_patch)
+							) : (
+								sbomEdge.version_major < cveEdge.last_affected_major OR
+								(sbomEdge.version_major == cveEdge.last_affected_major AND 
+								sbomEdge.version_minor < cveEdge.last_affected_minor) OR
+								(sbomEdge.version_major == cveEdge.last_affected_major AND 
+								sbomEdge.version_minor == cveEdge.last_affected_minor AND 
+								sbomEdge.version_patch <= cveEdge.last_affected_patch)
+							))
+						) : true
+						
+						LET cve = DOCUMENT(cveEdge._from)
+						FILTER cve != null
+						
+						LET matchedAffected = (
+							FOR affected IN cve.affected != null ? cve.affected : []
+								LET cveBasePurl = affected.package.purl != null ? 
+									affected.package.purl : 
+									CONCAT("pkg:", LOWER(affected.package.ecosystem), "/", affected.package.name)
+								FILTER cveBasePurl == purl.purl
+								RETURN affected
+						)
+						FILTER LENGTH(matchedAffected) > 0
+						
+						RETURN {
+							cve_id: cve._id,
+							cve_doc_id: cve.id,
+							package_purl: sbomEdge.full_purl,
+							package_version: sbomEdge.version,
+							all_affected: matchedAffected,
+							needs_validation: sbomEdge.version_major == null OR cveEdge.introduced_major == null
+						}
+	`
+
+	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
+		BindVars: map[string]interface{}{
+			"releaseKey": releaseKey,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	defer cursor.Close()
+
+	// 2. Validate and Collect Edges
+	var edgesToInsert []map[string]interface{}
+
+	type Candidate struct {
+		CveID           string            `json:"cve_id"`     // _id for edge
+		CveDocID        string            `json:"cve_doc_id"` // CVE-202X-XXXX
+		PackagePurl     string            `json:"package_purl"`
+		PackageVersion  string            `json:"package_version"`
+		AllAffected     []models.Affected `json:"all_affected"`
+		NeedsValidation bool              `json:"needs_validation"`
+	}
+
+	for cursor.HasMore() {
+		var cand Candidate
+		if _, err := cursor.ReadDocument(ctx, &cand); err != nil {
+			continue
+		}
+
+		// Perform Go-side validation if DB couldn't confirm
+		if cand.NeedsValidation {
+			isAffected := false
+			for _, affected := range cand.AllAffected {
+				if util.IsVersionAffected(cand.PackageVersion, affected) {
+					isAffected = true
+					break
+				}
+			}
+			if !isAffected {
+				// Skipping false positive match
+				continue
+			}
+		}
+
+		// Prepare Edge
+		edgesToInsert = append(edgesToInsert, map[string]interface{}{
+			"_from":           releaseID,
+			"_to":             cand.CveID,
+			"type":            "static_analysis",
+			"package_purl":    cand.PackagePurl,
+			"package_version": cand.PackageVersion,
+			"created_at":      time.Now(),
+		})
+	}
+
+	// 3. Batch Insert Edges
+	if len(edgesToInsert) > 0 {
+		return batchInsertEdges(ctx, "release2cve", edgesToInsert)
+	}
+
+	return nil
+}
+
 // ============================================================================
 // CVE Lifecycle Tracking for MTTR Analysis
 // ============================================================================
@@ -968,6 +1118,21 @@ func PostReleaseWithSBOM(c *fiber.Ctx) error {
 			Message: "Failed to process SBOM components: " + err.Error(),
 		})
 	}
+
+	// === NEW OPTION 2 LOGIC ===
+	// Link Release directly to CVEs (Materialized Edges)
+
+	// 1. Cleanup any old edges if this is an update
+	if err := deleteRelease2CVEEdges(ctx, releaseID); err != nil {
+		log.Printf("Warning: Failed to cleanup old CVE edges: %v", err)
+	}
+
+	// 2. Calculate and insert new edges
+	if err := linkReleaseToExistingCVEs(ctx, releaseID, req.Key); err != nil {
+		// Log error but don't fail the request, as this is a background optimization
+		log.Printf("Error linking release to CVEs: %v", err)
+	}
+	// ==========================
 
 	// Determine success message based on whether entities already existed (gocritic fix applied here)
 	var message string
