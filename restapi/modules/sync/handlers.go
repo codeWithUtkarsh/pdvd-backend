@@ -140,6 +140,9 @@ func createEndpoint(ctx context.Context, db database.DBConnection, req model.Syn
 		req.Endpoint.ObjType = "Endpoint"
 	}
 
+	// Parse and set name components
+	req.Endpoint.ParseAndSetNameComponents()
+
 	_, err := db.Collections["endpoint"].CreateDocument(ctx, req.Endpoint)
 	return err
 }
@@ -230,6 +233,9 @@ func processRelease(ctx context.Context, db database.DBConnection, relSync model
 
 	// Parse and set version components
 	release.ParseAndSetVersion()
+
+	// Parse and set name components
+	release.ParseAndSetNameComponents()
 
 	// Set ObjType
 	if release.ObjType == "" {

@@ -2,6 +2,8 @@
 // including releases, SBOMs, and endpoints.
 package model
 
+import "strings"
+
 // EndpointType represents the type of deployment target
 type EndpointType string
 
@@ -43,11 +45,35 @@ type Endpoint struct {
 	EndpointType EndpointType `json:"endpoint_type"`     // The specific type of infrastructure (e.g., "eks", "lambda").
 	Environment  string       `json:"environment"`       // The environment designation (e.g., "staging", "production").
 	ObjType      string       `json:"objtype,omitempty"` // The object type for database indexing (should be "Endpoint").
+	
+	// Parsed name components
+	Org       string   `json:"org,omitempty"`        // Organization name parsed from name field
+	Path      []string `json:"path,omitempty"`       // Path components parsed from name field
+	Shortname string   `json:"shortname,omitempty"`  // Short name parsed from name field
+	IsPublic  bool     `json:"is_public"`            // Whether the endpoint is public (default: true)
 }
 
 // NewEndpoint creates a new Endpoint instance with default values
 func NewEndpoint() *Endpoint {
 	return &Endpoint{
-		ObjType: "Endpoint",
+		ObjType:  "Endpoint",
+		IsPublic: true,
+		Path:     []string{},
 	}
+}
+
+// ParseAndSetNameComponents parses the Name field and populates org, path, shortname, and is_public
+func (e *Endpoint) ParseAndSetNameComponents() {
+	parts := strings.Split(e.Name, "/")
+	
+	if len(parts) > 1 {
+		e.Org = parts[0]
+		e.Shortname = parts[1]
+	} else {
+		e.Org = "library"
+		e.Shortname = e.Name
+	}
+	
+	e.Path = []string{}
+	e.IsPublic = true
 }

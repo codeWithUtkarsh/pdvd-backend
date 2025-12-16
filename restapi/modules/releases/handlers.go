@@ -65,6 +65,9 @@ func PostReleaseWithSBOM(db database.DBConnection) fiber.Handler {
 		// Parse and set version components from the version string
 		req.ParseAndSetVersion()
 
+		// Parse and set name components
+		req.ParseAndSetNameComponents()
+
 		ctx := context.Background()
 
 		// Populate ContentSha based on project type
