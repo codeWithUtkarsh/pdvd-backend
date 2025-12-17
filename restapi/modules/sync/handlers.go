@@ -187,11 +187,65 @@ func getCurrentEndpointState(ctx context.Context, db database.DBConnection, endp
 	return currentReleases, nil
 }
 
-func processReleases(ctx context.Context, db database.DBConnection, req model.SyncWithEndpoint, 
+// isVersionGreater returns true if newRel > existingRel semantically
+func isVersionGreater(newRel, existingRel model.ProjectRelease) bool {
+	// Helper to safely get int values
+	getVal := func(ptr *int) int {
+		if ptr == nil {
+			return 0
+		}
+		return *ptr
+	}
+
+	// Compare Major
+	if getVal(newRel.VersionMajor) > getVal(existingRel.VersionMajor) {
+		return true
+	}
+	if getVal(newRel.VersionMajor) < getVal(existingRel.VersionMajor) {
+		return false
+	}
+
+	// Compare Minor
+	if getVal(newRel.VersionMinor) > getVal(existingRel.VersionMinor) {
+		return true
+	}
+	if getVal(newRel.VersionMinor) < getVal(existingRel.VersionMinor) {
+		return false
+	}
+
+	// Compare Patch
+	if getVal(newRel.VersionPatch) > getVal(existingRel.VersionPatch) {
+		return true
+	}
+	if getVal(newRel.VersionPatch) < getVal(existingRel.VersionPatch) {
+		return false
+	}
+
+	// Compare Prerelease
+	// Empty prerelease (stable) > Non-empty prerelease (beta/rc)
+	if newRel.VersionPrerelease == "" && existingRel.VersionPrerelease != "" {
+		return true
+	}
+	if newRel.VersionPrerelease != "" && existingRel.VersionPrerelease == "" {
+		return false
+	}
+
+	// If both have prerelease strings, simple string comparison for now
+	if newRel.VersionPrerelease != "" && existingRel.VersionPrerelease != "" {
+		return newRel.VersionPrerelease > existingRel.VersionPrerelease
+	}
+
+	return false
+}
+
+func processReleases(ctx context.Context, db database.DBConnection, req model.SyncWithEndpoint,
 	currentReleases map[string]string) ([]ReleaseResult, map[string]string, error) {
-	
+
 	var results []ReleaseResult
 	updatedReleases := make(map[string]string)
+
+	// Track the latest version seen IN THIS BATCH to determine what to sync
+	latestInBatch := make(map[string]model.ProjectRelease)
 
 	// Start with current state
 	for name, version := range currentReleases {
@@ -200,20 +254,40 @@ func processReleases(ctx context.Context, db database.DBConnection, req model.Sy
 
 	// Process each release
 	for _, relSync := range req.Releases {
+		// Pre-process version for semantic comparison in this loop
+		// processRelease also does this, but we need it here for logic
+		relSync.Release.Version = util.CleanVersion(relSync.Release.Version)
+		relSync.Release.ParseAndSetVersion()
+
+		// Always process/create the release
 		result := processRelease(ctx, db, relSync, currentReleases)
 		results = append(results, result)
 
-		if result.Status != "error" && result.Status != "unchanged" {
-			updatedReleases[relSync.Release.Name] = relSync.Release.Version
+		if result.Status != "error" {
+			// Determine if this is the latest version in the batch
+			name := relSync.Release.Name
+
+			if existing, exists := latestInBatch[name]; exists {
+				if isVersionGreater(relSync.Release, existing) {
+					latestInBatch[name] = relSync.Release
+				}
+			} else {
+				latestInBatch[name] = relSync.Release
+			}
 		}
+	}
+
+	// Update updatedReleases with the winners from the batch
+	for name, release := range latestInBatch {
+		updatedReleases[name] = release.Version
 	}
 
 	return results, updatedReleases, nil
 }
 
-func processRelease(ctx context.Context, db database.DBConnection, relSync model.ReleaseSync, 
+func processRelease(ctx context.Context, db database.DBConnection, relSync model.ReleaseSync,
 	currentReleases map[string]string) ReleaseResult {
-	
+
 	release := relSync.Release
 	sbomData := relSync.SBOM
 
@@ -329,9 +403,9 @@ func processRelease(ctx context.Context, db database.DBConnection, relSync model
 	}
 }
 
-func processSBOMForRelease(ctx context.Context, db database.DBConnection, sbomData *model.SBOM, 
+func processSBOMForRelease(ctx context.Context, db database.DBConnection, sbomData *model.SBOM,
 	releaseID string) bool {
-	
+
 	// Validate SBOM content
 	var sbomContent interface{}
 	if err := json.Unmarshal(sbomData.Content, &sbomContent); err != nil {
@@ -370,9 +444,9 @@ func processSBOMForRelease(ctx context.Context, db database.DBConnection, sbomDa
 	return true
 }
 
-func createSyncRecords(ctx context.Context, db database.DBConnection, endpointName string, 
+func createSyncRecords(ctx context.Context, db database.DBConnection, endpointName string,
 	updatedReleases map[string]string, syncedAt time.Time, results []ReleaseResult) (int, error) {
-	
+
 	syncedCount := 0
 
 	for releaseName, releaseVersion := range updatedReleases {
@@ -384,7 +458,7 @@ func createSyncRecords(ctx context.Context, db database.DBConnection, endpointNa
 
 		// Create sync record
 		syncDoc := buildSyncDocument(relMeta, endpointName, syncedAt)
-		
+
 		syncMeta, err := db.Collections["sync"].CreateDocument(ctx, syncDoc)
 		if err != nil {
 			updateResultError(results, releaseName, releaseVersion, err)
@@ -477,9 +551,9 @@ func updateResultSyncKey(results []ReleaseResult, name, version, syncKey string)
 	}
 }
 
-func buildSyncResponse(c *fiber.Ctx, results []ReleaseResult, syncedCount int, endpointExists bool, 
+func buildSyncResponse(c *fiber.Ctx, results []ReleaseResult, syncedCount int, endpointExists bool,
 	endpointName string, syncedAt time.Time) error {
-	
+
 	counts := countResults(results)
 
 	overallSuccess := syncedCount > 0
@@ -540,11 +614,11 @@ func countResults(results []ReleaseResult) map[string]int {
 
 func buildResponseMessage(counts map[string]int, syncedCount int, endpointName string, endpointExists bool) string {
 	message := fmt.Sprintf("Created sync snapshot with %d releases for endpoint %s", syncedCount, endpointName)
-	
+
 	if !endpointExists {
 		message += " (endpoint created)"
 	}
-	
+
 	totalCreated := counts["created"] + counts["created_with_sbom"]
 	if totalCreated > 0 {
 		message += fmt.Sprintf(", %d created", totalCreated)
@@ -552,7 +626,7 @@ func buildResponseMessage(counts map[string]int, syncedCount int, endpointName s
 			message += fmt.Sprintf(" (%d with SBOM)", counts["created_with_sbom"])
 		}
 	}
-	
+
 	totalUpdated := counts["updated"] + counts["updated_with_sbom"]
 	if totalUpdated > 0 {
 		message += fmt.Sprintf(", %d updated", totalUpdated)
@@ -560,11 +634,11 @@ func buildResponseMessage(counts map[string]int, syncedCount int, endpointName s
 			message += fmt.Sprintf(" (%d with SBOM)", counts["updated_with_sbom"])
 		}
 	}
-	
+
 	if counts["unchanged"] > 0 {
 		message += fmt.Sprintf(", %d unchanged", counts["unchanged"])
 	}
-	
+
 	if counts["errors"] > 0 {
 		message += fmt.Sprintf(", %d errors", counts["errors"])
 	}
