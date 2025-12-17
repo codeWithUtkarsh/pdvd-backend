@@ -1,8 +1,8 @@
 // Package sync defines the REST API types for sync operations.
 package sync
 
-// SyncRequest represents the request body for creating a sync
-type SyncRequest struct {
+// Request represents the request body for creating a sync
+type Request struct {
 	ReleaseName    string `json:"release_name"`
 	ReleaseVersion string `json:"release_version"`
 	EndpointName   string `json:"endpoint_name"`
@@ -10,8 +10,8 @@ type SyncRequest struct {
 	SyncMessage    string `json:"sync_message,omitempty"`
 }
 
-// SyncResponse represents the response for sync operations
-type SyncResponse struct {
+// Response represents the response for sync operations
+type Response struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
 	SyncKey string `json:"sync_key,omitempty"`
