@@ -30,7 +30,7 @@ func PostBackfillMTTR(db database.DBConnection) fiber.Handler {
 
 		var req BackfillRequest
 		if err := c.BodyParser(&req); err != nil {
-			req.DaysBack = 90 // Default to 90 days
+			req.DaysBack = 90
 		}
 
 		if req.DaysBack <= 0 || req.DaysBack > 365 {
@@ -40,7 +40,6 @@ func PostBackfillMTTR(db database.DBConnection) fiber.Handler {
 			})
 		}
 
-		// Run backfill in background
 		go runBackfill(db, req.DaysBack)
 
 		return c.JSON(fiber.Map{
@@ -70,16 +69,17 @@ func runBackfill(db database.DBConnection, daysBack int) {
 
 	log.Printf("Starting CVE lifecycle backfill for last %d days...", daysBack)
 
-	// Fetch sync history
+	// FIXED: Parse synced_at as DATE_ISO8601 and pass cutoffDate as string
 	syncQuery := `
 		FOR sync IN sync
-			FILTER sync.synced_at >= @cutoffDate
-			SORT sync.synced_at ASC
+			LET syncedAt = DATE_ISO8601(sync.synced_at)
+			FILTER syncedAt >= @cutoffDate
+			SORT syncedAt ASC
 			RETURN {
 				endpoint_name: sync.endpoint_name,
 				release_name: sync.release_name,
 				release_version: sync.release_version,
-				synced_at: sync.synced_at
+				synced_at: syncedAt
 			}
 	`
 
@@ -92,7 +92,7 @@ func runBackfill(db database.DBConnection, daysBack int) {
 
 	cursor, err := db.Database.Query(ctx, syncQuery, &arangodb.QueryOptions{
 		BindVars: map[string]interface{}{
-			"cutoffDate": cutoffDate,
+			"cutoffDate": cutoffDate.Format(time.RFC3339), // FIXED: Pass as string
 		},
 	})
 	if err != nil {
@@ -114,7 +114,6 @@ func runBackfill(db database.DBConnection, daysBack int) {
 	backfillProgress = fmt.Sprintf("Processing %d sync events...", len(allSyncs))
 	log.Printf("Processing %d sync events", len(allSyncs))
 
-	// Group by endpoint
 	endpointSyncs := make(map[string][]SyncEvent)
 	for _, sync := range allSyncs {
 		endpointSyncs[sync.EndpointName] = append(endpointSyncs[sync.EndpointName], sync)
@@ -129,17 +128,14 @@ func runBackfill(db database.DBConnection, daysBack int) {
 		backfillProgress = fmt.Sprintf("Processing endpoint %d/%d: %s",
 			processedEndpoints, len(endpointSyncs), endpointName)
 
-		// Track CVE state
 		currentCVEs := make(map[string]lifecycle.CurrentCVEInfo)
 
 		for _, sync := range syncs {
-			// Get CVEs for this release
 			newCVEs, err := lifecycle.GetCVEsForReleaseTracking(ctx, db, sync.ReleaseName, sync.ReleaseVersion)
 			if err != nil {
 				continue
 			}
 
-			// Build new state
 			newState := make(map[string]lifecycle.CurrentCVEInfo)
 			for cveID, cveInfo := range newCVEs {
 				key := fmt.Sprintf("%s:%s:%s", cveID, cveInfo.Package, sync.ReleaseName)
@@ -156,7 +152,6 @@ func runBackfill(db database.DBConnection, daysBack int) {
 				}
 			}
 
-			// Process current State (Upsert / Introduce)
 			for _, cveInfo := range newState {
 				disclosedAfter := false
 				if !cveInfo.Published.IsZero() {
@@ -172,7 +167,6 @@ func runBackfill(db database.DBConnection, daysBack int) {
 				}
 			}
 
-			// Detect remediations
 			for key, cveInfo := range currentCVEs {
 				if _, stillExists := newState[key]; !stillExists {
 					err := lifecycle.MarkCVERemediated(ctx, db, model.CVELifecycleEvent{
