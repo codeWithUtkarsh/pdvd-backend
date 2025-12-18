@@ -1,5 +1,5 @@
 // Package sync handles the synchronization of release and CVE data.
-// It processes SBOMs and updates CVE lifecycle tracking.
+// It processes SBOMs and updates CVE lifecycle tracking using the shared lifecycle package.
 package sync
 
 import (
@@ -11,16 +11,15 @@ import (
 	"github.com/ortelius/pdvd-backend/v12/lifecycle"
 )
 
-// ProcessSync handles a sync event and updates lifecycle tracking
-// CRITICAL FIX: Now properly creates lifecycle records for EVERY version
-// CRITICAL FIX: Compares with previous version to mark remediations
+// ProcessSync handles a sync event and updates lifecycle tracking.
+// This is called whenever a new version is deployed.
 func ProcessSync(
 	ctx context.Context,
 	db database.DBConnection,
 	endpointName string,
 	releaseName string,
 	releaseVersion string,
-	sbomCVEs []lifecycle.CVEInfo,  // CVEs extracted from this version's SBOM
+	sbomCVEs []lifecycle.CVEInfo,
 	syncedAt time.Time,
 ) error {
 	
@@ -39,13 +38,12 @@ func ProcessSync(
 	
 	isFirstDeployment := previousVersion == ""
 	if isFirstDeployment {
-		fmt.Printf("  First deployment of %s - creating lifecycle records\n", releaseName)
+		fmt.Printf("  First deployment of %s\n", releaseName)
 	} else {
 		fmt.Printf("  Upgrading from %s to %s\n", previousVersion, releaseVersion)
 	}
 	
 	// Step 2: Create lifecycle records for all CVEs in this version
-	// Build a map of current CVEs for comparison
 	currentCVEMap := make(map[string]lifecycle.CVEInfo)
 	
 	for _, cve := range sbomCVEs {
@@ -53,16 +51,16 @@ func ProcessSync(
 		currentCVEMap[key] = cve
 		
 		// Determine if this CVE was disclosed after deployment
-		disclosedAfter := cve.Published.After(syncedAt)
+		disclosedAfter := !cve.Published.IsZero() && cve.Published.After(syncedAt)
 		
-		// CRITICAL: Pass the correct version and sync timestamp
-		err := lifecycle.UpsertLifecycleRecord(
+		// CRITICAL: Use shared lifecycle package
+		err := lifecycle.CreateOrUpdateLifecycleRecord(
 			ctx, db,
 			endpointName,
 			releaseName,
-			releaseVersion,  // FIXED: Use actual version, not cached
+			releaseVersion,
 			cve,
-			syncedAt,        // FIXED: Use actual sync time, not time.Now()
+			syncedAt,        // ✅ Actual sync time
 			disclosedAfter,
 		)
 		
@@ -71,13 +69,11 @@ func ProcessSync(
 		}
 	}
 	
-	fmt.Printf("  Created/updated %d lifecycle records for version %s\n",
-		len(sbomCVEs), releaseVersion)
+	fmt.Printf("  Created/updated %d lifecycle records\n", len(sbomCVEs))
 	
-	// Step 3: If not first deployment, compare with previous version
-	// and mark remediations
+	// Step 3: If not first deployment, compare versions and mark remediations
 	if !isFirstDeployment {
-		err = lifecycle.CompareAndMarkRemediations(
+		remediatedCount, err := lifecycle.CompareAndMarkRemediations(
 			ctx, db,
 			endpointName, releaseName,
 			previousVersion, releaseVersion,
@@ -88,51 +84,9 @@ func ProcessSync(
 		if err != nil {
 			return fmt.Errorf("failed to compare versions: %w", err)
 		}
+		
+		fmt.Printf("  Marked %d CVEs as remediated\n", remediatedCount)
 	}
 	
 	return nil
 }
-
-// Example usage in your main sync handler:
-/*
-func HandleSyncEvent(ctx context.Context, db database.DBConnection, event SyncEvent) error {
-	// 1. Extract SBOM and parse CVEs
-	sbom, err := extractSBOM(event.ReleaseImage)
-	if err != nil {
-		return err
-	}
-	
-	cves := parseCVEsFromSBOM(sbom)
-	
-	// 2. Create sync record
-	syncRecord := map[string]interface{}{
-		"release_name":    event.ReleaseName,
-		"release_version": event.ReleaseVersion,
-		"endpoint_name":   event.EndpointName,
-		"synced_at":       event.SyncedAt,
-		"objtype":         "Sync",
-	}
-	
-	_, err = db.Collection("sync").CreateDocument(ctx, syncRecord)
-	if err != nil {
-		return err
-	}
-	
-	// 3. Process lifecycle tracking (THIS IS THE CRITICAL STEP!)
-	err = ProcessSync(
-		ctx, db,
-		event.EndpointName,
-		event.ReleaseName,
-		event.ReleaseVersion,
-		cves,
-		event.SyncedAt,
-	)
-	
-	if err != nil {
-		log.Printf("Warning: Failed to update CVE lifecycle tracking: %v", err)
-		// Don't fail the sync, just log the error
-	}
-	
-	return nil
-}
-*/
