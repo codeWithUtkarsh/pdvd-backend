@@ -49,18 +49,18 @@ func ResolveVulnerabilityTrend(db database.DBConnection, days int) ([]map[string
 	now := time.Now().UTC()
 	startDate := now.AddDate(0, 0, -days).Truncate(24 * time.Hour)
 
-	// FIXED: Parse RFC3339 strings to timestamps for proper comparison
+	// FIXED: Parse as timestamps for comparison, then format as ISO8601 for Go unmarshaling
 	query := `
 		FOR r IN cve_lifecycle
-			LET introduced = DATE_TIMESTAMP(r.introduced_at)
-			LET remediated = r.remediated_at != null ? DATE_TIMESTAMP(r.remediated_at) : null
+			LET introduced_ts = DATE_TIMESTAMP(r.introduced_at)
+			LET remediated_ts = r.remediated_at != null ? DATE_TIMESTAMP(r.remediated_at) : null
 			
-			FILTER introduced <= @now
-			FILTER r.is_remediated == false OR remediated >= @startDate
+			FILTER introduced_ts <= @now
+			FILTER r.is_remediated == false OR remediated_ts >= @startDate
 			RETURN {
 				severity: r.severity_rating,
-				introduced_at: introduced,
-				remediated_at: remediated,
+				introduced_at: DATE_ISO8601(introduced_ts),
+				remediated_at: remediated_ts != null ? DATE_ISO8601(remediated_ts) : null,
 				is_remediated: r.is_remediated
 			}
 	`
