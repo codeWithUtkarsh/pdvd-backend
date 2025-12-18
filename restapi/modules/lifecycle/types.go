@@ -26,3 +26,13 @@ type CVEInfoTracking struct {
 	SeverityScore  float64
 	Published      time.Time
 }
+
+// CVEInfo holds CVE information including the CVE ID
+// Used by sync handler and OSV loader for creating lifecycle records
+type CVEInfo struct {
+	CVEID          string
+	Package        string
+	SeverityRating string
+	SeverityScore  float64
+	Published      time.Time
+}

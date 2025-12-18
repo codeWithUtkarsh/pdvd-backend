@@ -4,7 +4,6 @@ package restapi
 import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/ortelius/pdvd-backend/v12/database"
-	"github.com/ortelius/pdvd-backend/v12/restapi/modules/admin"
 	"github.com/ortelius/pdvd-backend/v12/restapi/modules/auth" // ADDED
 	"github.com/ortelius/pdvd-backend/v12/restapi/modules/releases"
 	"github.com/ortelius/pdvd-backend/v12/restapi/modules/sync"
@@ -31,8 +30,4 @@ func SetupRoutes(app *fiber.App, db database.DBConnection) {
 	// Sync endpoints
 	api.Post("/sync", sync.PostSyncWithEndpoint(db))
 
-	// Admin endpoints
-	adminGroup := api.Group("/admin")
-	adminGroup.Post("/backfill-mttr", admin.PostBackfillMTTR(db))
-	adminGroup.Get("/backfill-status", admin.GetBackfillStatus())
 }
