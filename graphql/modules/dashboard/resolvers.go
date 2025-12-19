@@ -267,7 +267,7 @@ func ResolveMTTR(db database.DBConnection, days int) (map[string]interface{}, er
 		LET exec_summary = {
 			total_new_cves: SUM(severity_groups[*].new_detected),
 			total_fixed_cves: total_fixed,
-			post_deployment_cves: SUM(severity_groups[*].open_post_count),
+			post_deployment_cves: SUM(severity_groups[*].open_post_in_window_count),
 			
 			mttr_all: LENGTH(severity_groups) > 0 ? AVG(severity_groups[*].mttr) : 0,
 			mttr_post_deployment: LENGTH(severity_groups) > 0 ? AVG(severity_groups[*].mttr_post_deployment) : 0,
