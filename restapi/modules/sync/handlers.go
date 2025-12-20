@@ -132,17 +132,23 @@ func PostSyncWithEndpoint(db database.DBConnection) fiber.Handler {
 }
 
 // getCVEsForRelease retrieves CVEs affecting a specific release
+// FIXED: getCVEsForRelease - Returns BASE PURL instead of FULL PURL
+// This ensures lifecycle records can be matched by queries
+
 func getCVEsForRelease(ctx context.Context, db database.DBConnection, releaseName, releaseVersion string) ([]lifecycle.CVEInfo, error) {
-	// FIX: Use DATE_ISO8601 to ensure Published can be parsed if it's missing timezone info
+	// CRITICAL FIX: Return base PURL (without version) for lifecycle matching
 	query := `
 		FOR release IN release
 			FILTER release.name == @name AND release.version == @version
 			LIMIT 1
 			
 			FOR cve, edge IN 1..1 OUTBOUND release release2cve
+				// Extract base PURL by removing @version suffix
+				LET basePurl = REGEX_REPLACE(edge.package_purl, "@[^@]*$", "")
+				
 				RETURN {
 					cve_id: cve.id,
-					package: edge.package_purl,
+					package: basePurl,  // FIXED: Use base PURL (no version)
 					severity_rating: cve.database_specific.severity_rating,
 					severity_score: cve.database_specific.cvss_base_score,
 					published: DATE_ISO8601(cve.published)
@@ -164,7 +170,7 @@ func getCVEsForRelease(ctx context.Context, db database.DBConnection, releaseNam
 	for cursor.HasMore() {
 		var raw struct {
 			CveID          string  `json:"cve_id"`
-			Package        string  `json:"package"`
+			Package        string  `json:"package"` // Now base PURL
 			SeverityRating string  `json:"severity_rating"`
 			SeverityScore  float64 `json:"severity_score"`
 			Published      string  `json:"published"`
@@ -183,11 +189,10 @@ func getCVEsForRelease(ctx context.Context, db database.DBConnection, releaseNam
 
 		cves = append(cves, lifecycle.CVEInfo{
 			CVEID:          raw.CveID,
-			Package:        raw.Package,
+			Package:        raw.Package, // Now correctly formatted as base PURL
 			SeverityRating: raw.SeverityRating,
 			SeverityScore:  raw.SeverityScore,
 			Published:      publishedTime,
-			// FIXED: Populate new Release context fields
 			ReleaseName:    releaseName,
 			ReleaseVersion: releaseVersion,
 		})
@@ -640,13 +645,45 @@ func updateResultSyncKey(results []ReleaseResult, name, version, syncKey string)
 
 func buildSyncResponse(c *fiber.Ctx, results []ReleaseResult, syncedCount int, endpointExists bool,
 	endpointName string, syncedAt time.Time) error {
+
 	counts := countResults(results)
+
+	overallSuccess := syncedCount > 0
+	statusCode := fiber.StatusCreated
+	if syncedCount == 0 {
+		statusCode = fiber.StatusBadRequest
+	} else if counts["errors"] > 0 {
+		statusCode = fiber.StatusMultiStatus
+	}
+
 	message := buildResponseMessage(counts, syncedCount, endpointName, endpointExists)
-	return c.Status(fiber.StatusCreated).JSON(fiber.Map{"success": syncedCount > 0, "message": message, "synced_at": syncedAt, "results": results})
+
+	return c.Status(statusCode).JSON(fiber.Map{
+		"success":           overallSuccess,
+		"message":           message,
+		"synced_at":         syncedAt,
+		"total_in_request":  len(results),
+		"total_synced":      syncedCount,
+		"created":           counts["created"] + counts["created_with_sbom"],
+		"created_with_sbom": counts["created_with_sbom"],
+		"updated":           counts["updated"] + counts["updated_with_sbom"],
+		"updated_with_sbom": counts["updated_with_sbom"],
+		"unchanged":         counts["unchanged"],
+		"errors":            counts["errors"],
+		"results":           results,
+	})
 }
 
 func countResults(results []ReleaseResult) map[string]int {
-	counts := map[string]int{"created": 0, "created_with_sbom": 0, "updated": 0, "updated_with_sbom": 0, "unchanged": 0, "errors": 0}
+	counts := map[string]int{
+		"created":           0,
+		"created_with_sbom": 0,
+		"updated":           0,
+		"updated_with_sbom": 0,
+		"unchanged":         0,
+		"errors":            0,
+	}
+
 	for _, result := range results {
 		switch result.Status {
 		case "created":
@@ -663,13 +700,40 @@ func countResults(results []ReleaseResult) map[string]int {
 			counts["errors"]++
 		}
 	}
+
 	return counts
 }
 
-func buildResponseMessage(_ map[string]int, syncedCount int, endpointName string, endpointExists bool) string {
-	msg := fmt.Sprintf("Created sync snapshot with %d releases for endpoint %s", syncedCount, endpointName)
+func buildResponseMessage(counts map[string]int, syncedCount int, endpointName string, endpointExists bool) string {
+	message := fmt.Sprintf("Created sync snapshot with %d releases for endpoint %s", syncedCount, endpointName)
+
 	if !endpointExists {
-		msg += " (endpoint created)"
+		message += " (endpoint created)"
 	}
-	return msg
+
+	totalCreated := counts["created"] + counts["created_with_sbom"]
+	if totalCreated > 0 {
+		message += fmt.Sprintf(", %d created", totalCreated)
+		if counts["created_with_sbom"] > 0 {
+			message += fmt.Sprintf(" (%d with SBOM)", counts["created_with_sbom"])
+		}
+	}
+
+	totalUpdated := counts["updated"] + counts["updated_with_sbom"]
+	if totalUpdated > 0 {
+		message += fmt.Sprintf(", %d updated", totalUpdated)
+		if counts["updated_with_sbom"] > 0 {
+			message += fmt.Sprintf(" (%d with SBOM)", counts["updated_with_sbom"])
+		}
+	}
+
+	if counts["unchanged"] > 0 {
+		message += fmt.Sprintf(", %d unchanged", counts["unchanged"])
+	}
+
+	if counts["errors"] > 0 {
+		message += fmt.Sprintf(", %d errors", counts["errors"])
+	}
+
+	return message
 }

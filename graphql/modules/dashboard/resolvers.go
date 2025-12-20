@@ -267,6 +267,7 @@ func ResolveMTTR(db database.DBConnection, days int) (map[string]interface{}, er
 		days = 180
 	}
 	cutoffDate := time.Now().AddDate(0, 0, -days)
+	cutoffTimestamp := cutoffDate.Unix() * 1000 // Convert to milliseconds
 
 	query := `
 		LET sla_def = { 
@@ -295,8 +296,8 @@ func ResolveMTTR(db database.DBConnection, days int) (map[string]interface{}, er
 					endpoint_type: ep_type,
 					sla_days: sla_days,
 					open_age: r.is_remediated ? 0 : DATE_DIFF(introduced, DATE_NOW(), "d"),
-					in_window_fix: (r.is_remediated AND remediated >= @cutoffDate),
-					in_window_detect: (introduced >= @cutoffDate),
+					in_window_fix: (r.is_remediated AND remediated >= @cutoffTimestamp),
+					in_window_detect: (introduced >= @cutoffTimestamp),
 					is_post: (r.disclosed_after_deployment == true)
 				})
 		)
@@ -361,7 +362,7 @@ func ResolveMTTR(db database.DBConnection, days int) (map[string]interface{}, er
 			mttr_all: total_fixed > 0 ? SUM(severity_groups[*]._sum_mttr) / total_fixed : 0,
 			mttr_post_deployment: total_fixed_post > 0 ? SUM(severity_groups[*]._sum_mttr_post) / total_fixed_post : 0,
 			
-			mean_open_age_all: total_open > 0 ? SUM(severity_groups[*]._sum_age) / total_open : 0,
+			mean_open_age_all: total_open > 0 ? SUM(severity_groups[*]._sum_open_age) / total_open : 0,
 			mean_open_age_post_deploy: total_open_post > 0 ? SUM(severity_groups[*]._sum_open_age_post) / total_open_post : 0,
 			
 			open_cves_beyond_sla_pct: total_open > 0 ? (SUM(severity_groups[*].open_beyond_sla_count) * 100.0 / total_open) : 0,
@@ -382,7 +383,7 @@ func ResolveMTTR(db database.DBConnection, days int) (map[string]interface{}, er
 	`
 
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
-		BindVars: map[string]interface{}{"cutoffDate": cutoffDate.Unix() * 1000},
+		BindVars: map[string]interface{}{"cutoffTimestamp": cutoffTimestamp},
 	})
 	if err != nil {
 		return nil, err
