@@ -239,6 +239,7 @@ func deleteRelease2CVEEdges(ctx context.Context, db database.DBConnection, relea
 }
 
 // linkReleaseToExistingCVEs finds matching CVEs for a release and creates materialized edges
+// FIXED: Removed strict version filter, always validate using util.IsVersionAffected
 func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, releaseID, releaseKey string) error {
 	query := `
 		FOR r IN release
@@ -252,36 +253,6 @@ func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, re
 					
 					FOR cveEdge IN cve2purl
 						FILTER cveEdge._to == purl._id
-						
-						FILTER (
-							sbomEdge.version_major != null AND 
-							cveEdge.introduced_major != null AND 
-							cveEdge.introduced_major > 0 AND 
-							(cveEdge.fixed_major != null OR cveEdge.last_affected_major != null)
-						) ? (
-							(sbomEdge.version_major > cveEdge.introduced_major OR
-							(sbomEdge.version_major == cveEdge.introduced_major AND 
-							sbomEdge.version_minor > cveEdge.introduced_minor) OR
-							(sbomEdge.version_major == cveEdge.introduced_major AND 
-							sbomEdge.version_minor == cveEdge.introduced_minor AND 
-							sbomEdge.version_patch >= cveEdge.introduced_patch))
-							AND
-							(cveEdge.fixed_major != null ? (
-								sbomEdge.version_major < cveEdge.fixed_major OR
-								(sbomEdge.version_major == cveEdge.fixed_major AND 
-								sbomEdge.version_minor < cveEdge.fixed_minor) OR
-								(sbomEdge.version_major == cveEdge.fixed_major AND 
-								sbomEdge.version_minor == cveEdge.fixed_minor AND 
-								sbomEdge.version_patch < cveEdge.fixed_patch)
-							) : (
-								sbomEdge.version_major < cveEdge.last_affected_major OR
-								(sbomEdge.version_major == cveEdge.last_affected_major AND 
-								sbomEdge.version_minor < cveEdge.last_affected_minor) OR
-								(sbomEdge.version_major == cveEdge.last_affected_major AND 
-								sbomEdge.version_minor == cveEdge.last_affected_minor AND 
-								sbomEdge.version_patch <= cveEdge.last_affected_patch)
-							))
-						) : true
 						
 						LET cve = DOCUMENT(cveEdge._from)
 						FILTER cve != null
@@ -301,8 +272,7 @@ func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, re
 							cve_doc_id: cve.id,
 							package_purl: sbomEdge.full_purl,
 							package_version: sbomEdge.version,
-							all_affected: matchedAffected,
-							needs_validation: sbomEdge.version_major == null OR cveEdge.introduced_major == null
+							all_affected: matchedAffected
 						}
 	`
 
@@ -319,12 +289,11 @@ func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, re
 	var edgesToInsert []map[string]interface{}
 
 	type Candidate struct {
-		CveID           string            `json:"cve_id"`
-		CveDocID        string            `json:"cve_doc_id"`
-		PackagePurl     string            `json:"package_purl"`
-		PackageVersion  string            `json:"package_version"`
-		AllAffected     []models.Affected `json:"all_affected"`
-		NeedsValidation bool              `json:"needs_validation"`
+		CveID          string            `json:"cve_id"`
+		CveDocID       string            `json:"cve_doc_id"`
+		PackagePurl    string            `json:"package_purl"`
+		PackageVersion string            `json:"package_version"`
+		AllAffected    []models.Affected `json:"all_affected"`
 	}
 
 	seenInstances := make(map[string]bool)
@@ -340,17 +309,16 @@ func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, re
 			continue
 		}
 
-		if cand.NeedsValidation {
-			isAffected := false
-			for _, affected := range cand.AllAffected {
-				if util.IsVersionAffected(cand.PackageVersion, affected) {
-					isAffected = true
-					break
-				}
+		// Always validate using ecosystem-specific parsers
+		isAffected := false
+		for _, affected := range cand.AllAffected {
+			if util.IsVersionAffected(cand.PackageVersion, affected) {
+				isAffected = true
+				break
 			}
-			if !isAffected {
-				continue
-			}
+		}
+		if !isAffected {
+			continue
 		}
 
 		seenInstances[instanceKey] = true

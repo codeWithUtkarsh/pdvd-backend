@@ -485,22 +485,48 @@ func processSBOMComponentsWithFixedPURLs(ctx context.Context, db database.DBConn
 	return nil
 }
 
+// In restapi/modules/sync/handlers.go
+// FIXED: Remove the same strict filter from linkReleaseToExistingCVEs call
+
+// Replace the linkReleaseToExistingCVEs function (around line 374-450) with this:
+
 func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, releaseID, releaseKey string) error {
 	query := `
 		FOR r IN release
 			FILTER r._key == @releaseKey
+			
 			FOR sbom IN 1..1 OUTBOUND r release2sbom
 				FOR sbomEdge IN sbom2purl
 					FILTER sbomEdge._from == sbom._id
 					LET purl = DOCUMENT(sbomEdge._to)
 					FILTER purl != null
+					
 					FOR cveEdge IN cve2purl
 						FILTER cveEdge._to == purl._id
+						
 						LET cve = DOCUMENT(cveEdge._from)
 						FILTER cve != null
-						RETURN { cve_id: cve._id, package_purl: sbomEdge.full_purl, package_version: sbomEdge.version, all_affected: cve.affected }
+						
+						LET matchedAffected = (
+							FOR affected IN cve.affected != null ? cve.affected : []
+								LET cveBasePurl = affected.package.purl != null ? 
+									affected.package.purl : 
+									CONCAT("pkg:", LOWER(affected.package.ecosystem), "/", affected.package.name)
+								FILTER cveBasePurl == purl.purl
+								RETURN affected
+						)
+						FILTER LENGTH(matchedAffected) > 0
+						
+						RETURN {
+							cve_id: cve._id,
+							package_purl: sbomEdge.full_purl,
+							package_version: sbomEdge.version,
+							all_affected: matchedAffected
+						}
 	`
-	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{BindVars: map[string]interface{}{"releaseKey": releaseKey}})
+	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
+		BindVars: map[string]interface{}{"releaseKey": releaseKey},
+	})
 	if err != nil {
 		return err
 	}
@@ -513,10 +539,20 @@ func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, re
 			AllAffected                        []models.Affected
 		}
 		cursor.ReadDocument(ctx, &cand)
+
+		// Always validate using ecosystem-specific version comparison
 		if util.IsVersionAffectedAny(cand.PackageVersion, cand.AllAffected) {
-			edges = append(edges, map[string]interface{}{"_from": releaseID, "_to": cand.CveID, "type": "static_analysis", "package_purl": cand.PackagePurl, "package_version": cand.PackageVersion, "created_at": time.Now()})
+			edges = append(edges, map[string]interface{}{
+				"_from":           releaseID,
+				"_to":             cand.CveID,
+				"type":            "static_analysis",
+				"package_purl":    cand.PackagePurl,
+				"package_version": cand.PackageVersion,
+				"created_at":      time.Now(),
+			})
 		}
 	}
+
 	if len(edges) > 0 {
 		return sbom.BatchInsertEdges(ctx, db, "release2cve", edges)
 	}
