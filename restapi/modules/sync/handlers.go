@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/arangodb/go-driver/v2/arangodb"
@@ -292,9 +293,9 @@ func getCurrentEndpointState(ctx context.Context, db database.DBConnection, endp
 			COLLECT release_name = sync.release_name INTO syncGroups = sync
 			LET latestSync = (
 				FOR s IN syncGroups
-					SORT DATE_TIMESTAMP(s.sync.synced_at) DESC
+					SORT DATE_TIMESTAMP(s.synced_at) DESC
 					LIMIT 1
-					RETURN s.sync
+					RETURN s
 			)[0]
 			RETURN {
 				name: latestSync.release_name,
@@ -484,7 +485,6 @@ func processSBOMComponentsWithFixedPURLs(ctx context.Context, db database.DBConn
 	return nil
 }
 
-// FIXED: Uses centralized PURL standardization
 func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, releaseID, releaseKey string) error {
 	query := `
 		FOR r IN release
@@ -497,61 +497,152 @@ func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, re
 					FILTER purl != null
 					
 					FOR cveEdge IN cve2purl
-						FILTER cveEdge._to == purl._id
+						FILTER cveEdge._to == purl._id  // ⭐ This already ensures PURL hub match
+						
+						// Numeric pre-filter (same as before)
+						FILTER (
+							sbomEdge.version_major != null AND 
+							cveEdge.introduced_major != null AND 
+							(cveEdge.fixed_major != null OR cveEdge.last_affected_major != null)
+						) ? (
+							(sbomEdge.version_major > cveEdge.introduced_major OR
+							 (sbomEdge.version_major == cveEdge.introduced_major AND 
+							  sbomEdge.version_minor > cveEdge.introduced_minor) OR
+							 (sbomEdge.version_major == cveEdge.introduced_major AND 
+							  sbomEdge.version_minor == cveEdge.introduced_minor AND 
+							  sbomEdge.version_patch >= cveEdge.introduced_patch))
+							AND
+							(cveEdge.fixed_major != null ? (
+								sbomEdge.version_major < cveEdge.fixed_major OR
+								(sbomEdge.version_major == cveEdge.fixed_major AND 
+								 sbomEdge.version_minor < cveEdge.fixed_minor) OR
+								(sbomEdge.version_major == cveEdge.fixed_major AND 
+								 sbomEdge.version_minor == cveEdge.fixed_minor AND 
+								 sbomEdge.version_patch < cveEdge.fixed_patch)
+							) : (
+								sbomEdge.version_major < cveEdge.last_affected_major OR
+								(sbomEdge.version_major == cveEdge.last_affected_major AND 
+								 sbomEdge.version_minor < cveEdge.last_affected_minor) OR
+								(sbomEdge.version_major == cveEdge.last_affected_major AND 
+								 sbomEdge.version_minor == cveEdge.last_affected_minor AND 
+								 sbomEdge.version_patch <= cveEdge.last_affected_patch)
+							))
+						) : true
 						
 						LET cve = DOCUMENT(cveEdge._from)
 						FILTER cve != null
 						
-						LET matchedAffected = (
-							FOR affected IN cve.affected != null ? cve.affected : []
-								LET cveBasePurl = affected.package.purl != null ? 
-									affected.package.purl : 
-									CONCAT("pkg:", LOWER(affected.package.ecosystem), "/", affected.package.name)
-								FILTER cveBasePurl == purl.purl
-								RETURN affected
-						)
-						FILTER LENGTH(matchedAffected) > 0
+						// ⭐ REMOVED: matchedAffected filter - not needed since cve2purl edge already validates PURL match
+						// The cve2purl edge only exists if the CVE affects this PURL
+						// So we can directly use cve.affected for Go validation fallback
 						
 						RETURN {
 							cve_id: cve._id,
-							package_purl: sbomEdge.full_purl,
-							package_base: purl.purl,
+							cve_doc_id: cve.id,
+							package_purl_full: sbomEdge.full_purl,
+							package_purl_base: purl.purl,
 							package_version: sbomEdge.version,
-							all_affected: matchedAffected
+							all_affected: cve.affected,  // ⭐ Return all for Go validation
+							needs_validation: sbomEdge.version_major == null OR cveEdge.introduced_major == null
 						}
 	`
+
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
-		BindVars: map[string]interface{}{"releaseKey": releaseKey},
+		BindVars: map[string]interface{}{
+			"releaseKey": releaseKey,
+		},
 	})
 	if err != nil {
 		return err
 	}
 	defer cursor.Close()
 
-	var edges []map[string]interface{}
+	var edgesToInsert []map[string]interface{}
+
+	type Candidate struct {
+		CveID           string            `json:"cve_id"`
+		CveDocID        string            `json:"cve_doc_id"`
+		PackagePurlFull string            `json:"package_purl_full"`
+		PackagePurlBase string            `json:"package_purl_base"`
+		PackageVersion  string            `json:"package_version"`
+		AllAffected     []models.Affected `json:"all_affected"`
+		NeedsValidation bool              `json:"needs_validation"`
+	}
+
+	seenInstances := make(map[string]bool)
+
 	for cursor.HasMore() {
-		var cand struct {
-			CveID, PackagePurl, PackageBase, PackageVersion string
-			AllAffected                                     []models.Affected
+		var cand Candidate
+		if _, err := cursor.ReadDocument(ctx, &cand); err != nil {
+			continue
 		}
-		cursor.ReadDocument(ctx, &cand)
 
-		if util.IsVersionAffectedAny(cand.PackageVersion, cand.AllAffected) {
-			edges = append(edges, map[string]interface{}{
-				"_from":           releaseID,
-				"_to":             cand.CveID,
-				"type":            "static_analysis",
-				"package_purl":    cand.PackagePurl,
-				"package_base":    cand.PackageBase,
-				"package_version": cand.PackageVersion,
-				"created_at":      time.Now(),
-			})
+		// Deduplication using base PURL
+		instanceKey := cand.CveID + ":" + cand.PackagePurlBase
+		if seenInstances[instanceKey] {
+			continue
 		}
+
+		// Validation fallback for non-numeric versions
+		if cand.NeedsValidation && len(cand.AllAffected) > 0 {
+			// Find the affected entry that matches this PURL
+			matchFound := false
+			for _, affected := range cand.AllAffected {
+				// ⭐ Use same standardization as hub creation
+				affectedPurl := ""
+				if affected.Package.Purl != "" {
+					// Use the PURL from OSV if available
+					affectedPurl = affected.Package.Purl
+				} else {
+					// Reconstruct using ecosystem mapping (same as GetBasePURLFromComponents)
+					ecosystem := string(affected.Package.Ecosystem)
+					namespace := affected.Package.Name
+					if strings.Contains(namespace, "/") {
+						parts := strings.Split(namespace, "/")
+						if len(parts) == 2 {
+							namespace = parts[0]
+						}
+					}
+					affectedPurl = util.GetBasePURLFromComponents(ecosystem, namespace, affected.Package.Name)
+				}
+
+				// Normalize to standard format
+				standardizedAffectedPurl, err := util.GetStandardBasePURL(affectedPurl)
+				if err != nil {
+					continue
+				}
+
+				// Check if this affected entry matches our package
+				if standardizedAffectedPurl == cand.PackagePurlBase {
+					if util.IsVersionAffected(cand.PackageVersion, affected) {
+						matchFound = true
+						break
+					}
+				}
+			}
+
+			if !matchFound {
+				continue
+			}
+		}
+
+		seenInstances[instanceKey] = true
+
+		edgesToInsert = append(edgesToInsert, map[string]interface{}{
+			"_from":           releaseID,
+			"_to":             cand.CveID,
+			"type":            "static_analysis",
+			"package_purl":    cand.PackagePurlFull,
+			"package_base":    cand.PackagePurlBase,
+			"package_version": cand.PackageVersion,
+			"created_at":      time.Now(),
+		})
 	}
 
-	if len(edges) > 0 {
-		return sbom.BatchInsertEdges(ctx, db, "release2cve", edges)
+	if len(edgesToInsert) > 0 {
+		return sbom.BatchInsertEdges(ctx, db, "release2cve", edgesToInsert)
 	}
+
 	return nil
 }
 
