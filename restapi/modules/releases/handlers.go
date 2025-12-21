@@ -239,12 +239,7 @@ func deleteRelease2CVEEdges(ctx context.Context, db database.DBConnection, relea
 }
 
 // linkReleaseToExistingCVEs finds matching CVEs for a release and creates materialized edges
-// FIXED: Removed strict version filter, always validate using util.IsVersionAffected
-// ENHANCED: Store both full and base PURL in release2cve edges
-// This enables efficient lifecycle tracking without regex parsing
-
-// In releases/handlers.go - linkReleaseToExistingCVEs function
-
+// FIXED: Uses centralized PURL standardization for consistent Hub joins
 func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, releaseID, releaseKey string) error {
 	query := `
 		FOR r IN release
@@ -276,7 +271,7 @@ func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, re
 							cve_id: cve._id,
 							cve_doc_id: cve.id,
 							package_purl_full: sbomEdge.full_purl,
-							package_purl_base: purl.purl,  // BASE PURL from hub
+							package_purl_base: purl.purl,
 							package_version: sbomEdge.version,
 							all_affected: matchedAffected
 						}
@@ -298,7 +293,7 @@ func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, re
 		CveID           string            `json:"cve_id"`
 		CveDocID        string            `json:"cve_doc_id"`
 		PackagePurlFull string            `json:"package_purl_full"`
-		PackagePurlBase string            `json:"package_purl_base"` // NEW
+		PackagePurlBase string            `json:"package_purl_base"`
 		PackageVersion  string            `json:"package_version"`
 		AllAffected     []models.Affected `json:"all_affected"`
 	}
@@ -331,13 +326,12 @@ func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, re
 
 		seenInstances[instanceKey] = true
 
-		// ENHANCED: Store both full and base PURL
 		edgesToInsert = append(edgesToInsert, map[string]interface{}{
 			"_from":           releaseID,
 			"_to":             cand.CveID,
 			"type":            "static_analysis",
-			"package_purl":    cand.PackagePurlFull, // Full PURL with version
-			"package_base":    cand.PackagePurlBase, // NEW: Base PURL for matching
+			"package_purl":    cand.PackagePurlFull,
+			"package_base":    cand.PackagePurlBase,
 			"package_version": cand.PackageVersion,
 			"created_at":      time.Now(),
 		})

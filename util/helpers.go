@@ -5,6 +5,7 @@
 package util
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -251,20 +252,89 @@ func CleanPURL(purlStr string) (string, error) {
 // GetBasePURL removes the version component from a PURL to create a base package identifier.
 // Used for matching CVE PURLs with SBOM component PURLs.
 // Example: pkg:apk/wolfi/glibc@2.42-r4 -> pkg:apk/wolfi/glibc
+// DEPRECATED: Use GetStandardBasePURL instead for consistency
 func GetBasePURL(purlStr string) (string, error) {
+	return GetStandardBasePURL(purlStr)
+}
+
+// ============================================================================
+// CENTRALIZED PURL STANDARDIZATION - SINGLE SOURCE OF TRUTH
+// ============================================================================
+
+// EcosystemToPurlType converts OSV ecosystem to PURL type
+// CRITICAL: This mapping ensures Wolfi/Chainguard CVEs link to apk SBOMs
+func EcosystemToPurlType(ecosystem string) string {
+	mapping := map[string]string{
+		"npm":        "npm",
+		"PyPI":       "pypi",
+		"Maven":      "maven",
+		"Go":         "golang",
+		"NuGet":      "nuget",
+		"RubyGems":   "gem",
+		"crates.io":  "cargo",
+		"Packagist":  "composer",
+		"Pub":        "pub",
+		"CocoaPods":  "cocoapods",
+		"Hex":        "hex",
+		"Alpine":     "apk",
+		"Wolfi":      "apk", // CRITICAL: Map Wolfi to apk
+		"Chainguard": "apk", // CRITICAL: Map Chainguard to apk
+		"Debian":     "deb",
+		"Ubuntu":     "deb",
+	}
+	
+	// Try exact match first
+	if purlType, exists := mapping[ecosystem]; exists {
+		return purlType
+	}
+	
+	// Fallback: try case-insensitive
+	for key, value := range mapping {
+		if strings.EqualFold(key, ecosystem) {
+			return value
+		}
+	}
+	
+	// Last resort: return lowercase ecosystem
+	return strings.ToLower(ecosystem)
+}
+
+// GetBasePURLFromComponents constructs a standardized base PURL from ecosystem and package name
+// This is the SINGLE SOURCE OF TRUTH for Hub PURL generation from OSV data
+// Example: ("Wolfi", "wolfi", "glibc") -> "pkg:apk/wolfi/glibc"
+func GetBasePURLFromComponents(ecosystem, namespace, name string) string {
+	purlType := EcosystemToPurlType(ecosystem)
+	
+	// Build base PURL
+	var basePurl string
+	if namespace != "" {
+		basePurl = fmt.Sprintf("pkg:%s/%s/%s", purlType, namespace, name)
+	} else {
+		basePurl = fmt.Sprintf("pkg:%s/%s", purlType, name)
+	}
+	
+	return strings.ToLower(basePurl)
+}
+
+// GetStandardBasePURL extracts a standardized base PURL (no version/qualifiers)
+// This is used to ensure consistent Hub keys across all collections
+// Example: "pkg:apk/wolfi/glibc@2.42-r4" -> "pkg:apk/wolfi/glibc"
+func GetStandardBasePURL(purlStr string) (string, error) {
 	parsed, err := packageurl.FromString(purlStr)
 	if err != nil {
 		return "", err
 	}
-
-	// FIX: Preserve the Namespace (e.g., "wolfi", "debian") to match OSV Loader logic.
-	// This ensures util.SanitizeKey generates matching Hub IDs.
+	
+	// Normalize the ecosystem using our mapping
+	normalizedType := EcosystemToPurlType(parsed.Type)
+	
 	base := packageurl.PackageURL{
-		Type:      parsed.Type,
-		Namespace: parsed.Namespace, // Changed from "" to parsed.Namespace
+		Type:      normalizedType,
+		Namespace: parsed.Namespace,
 		Name:      parsed.Name,
+		// Version, Qualifiers, Subpath intentionally omitted
 	}
-
+	
 	return strings.ToLower(base.ToString()), nil
 }
 
@@ -275,27 +345,6 @@ func ParsePURL(purlStr string) (*packageurl.PackageURL, error) {
 		return nil, err
 	}
 	return &parsed, nil
-}
-
-// EcosystemToPurlType converts OSV ecosystem to PURL type
-func EcosystemToPurlType(ecosystem string) string {
-	mapping := map[string]string{
-		"npm":       "npm",
-		"PyPI":      "pypi",
-		"Maven":     "maven",
-		"Go":        "golang",
-		"NuGet":     "nuget",
-		"RubyGems":  "gem",
-		"crates.io": "cargo",
-		"Packagist": "composer",
-		"Pub":       "pub",
-		"CocoaPods": "cocoapods",
-		"Hex":       "hex",
-		"Alpine":    "alpine",
-		"Debian":    "deb",
-		"Ubuntu":    "deb",
-	}
-	return mapping[ecosystem]
 }
 
 // IsVersionAffected checks if a version is affected by OSV ranges

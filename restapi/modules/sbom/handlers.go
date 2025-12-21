@@ -53,6 +53,7 @@ func ProcessSBOM(ctx context.Context, db database.DBConnection, sbom model.SBOM)
 }
 
 // ProcessSBOMComponents extracts PURLs from SBOM and creates hub-spoke relationships
+// FIXED: Now uses centralized PURL standardization for consistent Hub keys
 func ProcessSBOMComponents(ctx context.Context, db database.DBConnection, sbom model.SBOM, sbomID string) error {
 	// Parse SBOM content to extract components
 	var sbomData struct {
@@ -65,7 +66,7 @@ func ProcessSBOMComponents(ctx context.Context, db database.DBConnection, sbom m
 		return err
 	}
 
-	// Step 1: Collect and process all PURLs
+	// Step 1: Collect and process all PURLs using centralized standardization
 	var purlInfos []PurlInfo
 	basePurlSet := make(map[string]bool)
 
@@ -86,9 +87,10 @@ func ProcessSBOMComponents(ctx context.Context, db database.DBConnection, sbom m
 			continue
 		}
 
-		basePurl, err := util.GetBasePURL(cleanedPurl)
+		// CRITICAL FIX: Use centralized standardization for Hub key
+		basePurl, err := util.GetStandardBasePURL(cleanedPurl)
 		if err != nil {
-			log.Printf("Failed to get base PURL from %s: %v", cleanedPurl, err)
+			log.Printf("Failed to get standard base PURL from %s: %v", cleanedPurl, err)
 			continue
 		}
 
@@ -206,6 +208,7 @@ func ProcessSBOMComponents(ctx context.Context, db database.DBConnection, sbom m
 }
 
 // batchFindOrCreatePURLs finds or creates multiple PURLs in a single query
+// FIXED: Uses util.SanitizeKey on standardized base PURLs for consistent Hub IDs
 func batchFindOrCreatePURLs(ctx context.Context, db database.DBConnection, basePurls []string) (map[string]string, error) {
 	if len(basePurls) == 0 {
 		return make(map[string]string), nil

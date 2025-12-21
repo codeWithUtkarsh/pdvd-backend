@@ -132,23 +132,17 @@ func PostSyncWithEndpoint(db database.DBConnection) fiber.Handler {
 }
 
 // getCVEsForRelease retrieves CVEs affecting a specific release
-// FIXED: getCVEsForRelease - Returns BASE PURL instead of FULL PURL
-// This ensures lifecycle records can be matched by queries
-
+// FIXED: Returns base PURL from package_base field for lifecycle matching
 func getCVEsForRelease(ctx context.Context, db database.DBConnection, releaseName, releaseVersion string) ([]lifecycle.CVEInfo, error) {
-	// CRITICAL FIX: Return base PURL (without version) for lifecycle matching
 	query := `
 		FOR release IN release
 			FILTER release.name == @name AND release.version == @version
 			LIMIT 1
 			
 			FOR cve, edge IN 1..1 OUTBOUND release release2cve
-				// Extract base PURL by removing @version suffix
-				LET basePurl = REGEX_REPLACE(edge.package_purl, "@[^@]*$", "")
-				
 				RETURN {
 					cve_id: cve.id,
-					package: basePurl,  // FIXED: Use base PURL (no version)
+					package: edge.package_base,
 					severity_rating: cve.database_specific.severity_rating,
 					severity_score: cve.database_specific.cvss_base_score,
 					published: DATE_ISO8601(cve.published)
@@ -170,7 +164,7 @@ func getCVEsForRelease(ctx context.Context, db database.DBConnection, releaseNam
 	for cursor.HasMore() {
 		var raw struct {
 			CveID          string  `json:"cve_id"`
-			Package        string  `json:"package"` // Now base PURL
+			Package        string  `json:"package"`
 			SeverityRating string  `json:"severity_rating"`
 			SeverityScore  float64 `json:"severity_score"`
 			Published      string  `json:"published"`
@@ -189,7 +183,7 @@ func getCVEsForRelease(ctx context.Context, db database.DBConnection, releaseNam
 
 		cves = append(cves, lifecycle.CVEInfo{
 			CVEID:          raw.CveID,
-			Package:        raw.Package, // Now correctly formatted as base PURL
+			Package:        raw.Package,
 			SeverityRating: raw.SeverityRating,
 			SeverityScore:  raw.SeverityScore,
 			Published:      publishedTime,
@@ -461,7 +455,7 @@ func processSBOMComponentsWithFixedPURLs(ctx context.Context, db database.DBConn
 		compMap, _ := comp.(map[string]interface{})
 		purl, _ := compMap["purl"].(string)
 		cleaned, _ := util.CleanPURL(purl)
-		basePurl, _ := util.GetBasePURL(cleaned)
+		basePurl, _ := util.GetStandardBasePURL(cleaned)
 		componentData = append(componentData, map[string]interface{}{"basePurl": basePurl, "fullPurl": cleaned, "version": compMap["version"]})
 		basePurls = append(basePurls, basePurl)
 	}
@@ -490,11 +484,7 @@ func processSBOMComponentsWithFixedPURLs(ctx context.Context, db database.DBConn
 	return nil
 }
 
-// In restapi/modules/sync/handlers.go
-// FIXED: Remove the same strict filter from linkReleaseToExistingCVEs call
-
-// Replace the linkReleaseToExistingCVEs function (around line 374-450) with this:
-
+// FIXED: Uses centralized PURL standardization
 func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, releaseID, releaseKey string) error {
 	query := `
 		FOR r IN release
@@ -525,6 +515,7 @@ func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, re
 						RETURN {
 							cve_id: cve._id,
 							package_purl: sbomEdge.full_purl,
+							package_base: purl.purl,
 							package_version: sbomEdge.version,
 							all_affected: matchedAffected
 						}
@@ -540,18 +531,18 @@ func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, re
 	var edges []map[string]interface{}
 	for cursor.HasMore() {
 		var cand struct {
-			CveID, PackagePurl, PackageVersion string
-			AllAffected                        []models.Affected
+			CveID, PackagePurl, PackageBase, PackageVersion string
+			AllAffected                                     []models.Affected
 		}
 		cursor.ReadDocument(ctx, &cand)
 
-		// Always validate using ecosystem-specific version comparison
 		if util.IsVersionAffectedAny(cand.PackageVersion, cand.AllAffected) {
 			edges = append(edges, map[string]interface{}{
 				"_from":           releaseID,
 				"_to":             cand.CveID,
 				"type":            "static_analysis",
 				"package_purl":    cand.PackagePurl,
+				"package_base":    cand.PackageBase,
 				"package_version": cand.PackageVersion,
 				"created_at":      time.Now(),
 			})

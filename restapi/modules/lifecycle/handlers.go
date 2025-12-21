@@ -24,7 +24,6 @@ func CreateOrUpdateLifecycleRecord(
 	disclosedAfter bool,
 ) error {
 
-	// PERMANENT FIX: Block zero-value timestamps from polluting the collection [cite: 19]
 	if introducedAt.IsZero() {
 		return fmt.Errorf("refusing to create lifecycle record with zero-value timestamp for %s", cveInfo.CVEID)
 	}
@@ -110,7 +109,6 @@ func CompareAndMarkRemediations(ctx context.Context, db database.DBConnection, e
 }
 
 func GetPreviousVersion(ctx context.Context, db database.DBConnection, releaseName, endpointName string, currentSyncTime time.Time) (string, error) {
-	// Robust Sorting Fix [cite: 13, 19]
 	query := `FOR s IN sync FILTER s.release_name == @release_name AND s.endpoint_name == @endpoint_name AND DATE_TIMESTAMP(s.synced_at) < @current_time SORT DATE_TIMESTAMP(s.synced_at) DESC LIMIT 1 RETURN s.release_version`
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{BindVars: map[string]interface{}{"release_name": releaseName, "endpoint_name": endpointName, "current_time": currentSyncTime.Unix() * 1000}})
 	if err != nil || !cursor.HasMore() {
@@ -123,7 +121,6 @@ func GetPreviousVersion(ctx context.Context, db database.DBConnection, releaseNa
 }
 
 func GetSyncTimestamp(ctx context.Context, db database.DBConnection, releaseName, releaseVersion, endpointName string) (time.Time, error) {
-	// Normalization Fix [cite: 13, 19]
 	query := `FOR s IN sync FILTER s.release_name == @release_name AND s.release_version == @release_version AND s.endpoint_name == @endpoint_name SORT DATE_TIMESTAMP(s.synced_at) DESC LIMIT 1 RETURN DATE_ISO8601(s.synced_at)`
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{BindVars: map[string]interface{}{"release_name": releaseName, "release_version": releaseVersion, "endpoint_name": endpointName}})
 	if err != nil || !cursor.HasMore() {
@@ -136,8 +133,7 @@ func GetSyncTimestamp(ctx context.Context, db database.DBConnection, releaseName
 }
 
 func GetCVEsForReleaseTracking(ctx context.Context, db database.DBConnection, releaseName, releaseVersion string) (map[string]CVEInfo, error) {
-	// Normalization Fix [cite: 13, 19]
-	query := `FOR r IN release FILTER r.name == @name AND r.version == @version LIMIT 1 FOR cve, edge IN 1..1 OUTBOUND r release2cve RETURN { cve_id: cve.id, package: edge.package_purl, severity_rating: cve.database_specific.severity_rating, severity_score: cve.database_specific.cvss_base_score, published: DATE_ISO8601(cve.published) }`
+	query := `FOR r IN release FILTER r.name == @name AND r.version == @version LIMIT 1 FOR cve, edge IN 1..1 OUTBOUND r release2cve RETURN { cve_id: cve.id, package: edge.package_base, severity_rating: cve.database_specific.severity_rating, severity_score: cve.database_specific.cvss_base_score, published: DATE_ISO8601(cve.published) }`
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{BindVars: map[string]interface{}{"name": releaseName, "version": releaseVersion}})
 	if err != nil {
 		return nil, err
@@ -151,9 +147,8 @@ func GetCVEsForReleaseTracking(ctx context.Context, db database.DBConnection, re
 		}
 		if _, err := cursor.ReadDocument(ctx, &raw); err == nil {
 			pubTime, _ := time.Parse(time.RFC3339, raw.Published)
-			result[raw.CveID] = CVEInfo{
+			result[raw.CveID+":"+raw.Package] = CVEInfo{
 				CVEID: raw.CveID, Package: raw.Package, SeverityRating: raw.SeverityRating, SeverityScore: raw.SeverityScore, Published: pubTime,
-				// FIXED: Populate context fields
 				ReleaseName: releaseName, ReleaseVersion: releaseVersion,
 			}
 		}
@@ -174,7 +169,7 @@ func CreateRelease2CVEEdges(ctx context.Context, db database.DBConnection, relea
 			AllAffected                        []models.Affected
 		}
 		if _, err := cursor.ReadDocument(ctx, &cand); err == nil && util.IsVersionAffectedAny(cand.PackageVersion, cand.AllAffected) {
-			db.Collections["release2cve"].CreateDocument(ctx, map[string]interface{}{"_from": releaseID, "_to": cand.CveID, "type": "sbom_analysis", "package_purl": cand.PackagePurl, "package_version": cand.PackageVersion, "created_at": time.Now()})
+			db.Collections["release2cve"].CreateDocument(ctx, map[string]interface{}{"_from": releaseID, "_to": cand.CveID, "type": "sbom_analysis", "package_purl": cand.PackagePurl, "package_base": cand.PackagePurl, "package_version": cand.PackageVersion, "created_at": time.Now()})
 		}
 	}
 	return nil
