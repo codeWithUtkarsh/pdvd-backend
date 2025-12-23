@@ -1,4 +1,5 @@
 // Package sync implements the REST API handlers for sync operations.
+// STRATEGY: Partial Sync - Only sweep/resurrect releases in the sync payload
 package sync
 
 import (
@@ -98,8 +99,15 @@ func PostSyncWithEndpoint(db database.DBConnection) fiber.Handler {
 			})
 		}
 
-		// Step 4: Update CVE lifecycle tracking
+		// Step 4: PARTIAL SYNC - Sweep and resurrect ONLY releases in the payload
+		// Releases NOT in the payload are preserved (unchanged)
 		for releaseName, releaseVersion := range updatedReleases {
+			// Sweep this specific release
+			if err := lifecycle.SupersedeAllActiveCVEs(ctx, db, req.EndpointName, releaseName, syncedAt); err != nil {
+				fmt.Printf("Warning: Failed to sweep %s: %v\n", releaseName, err)
+				continue
+			}
+
 			// Get CVEs for this release from release2cve edges
 			sbomCVEs, err := getCVEsForRelease(ctx, db, releaseName, releaseVersion)
 			if err != nil {
@@ -107,7 +115,7 @@ func PostSyncWithEndpoint(db database.DBConnection) fiber.Handler {
 				continue
 			}
 
-			// Process lifecycle tracking for this release
+			// Resurrect CVEs for this release
 			err = ProcessSync(
 				ctx, db,
 				req.EndpointName,
@@ -200,16 +208,7 @@ func ProcessSync(
 	syncedAt time.Time,
 ) error {
 
-	// Step 0: Supersede ALL active records for this app/endpoint.
-	// This prevents "Zombie Records" by ensuring we never leave old versions open.
-	// We do this BEFORE writing new records to ensure a clean slate.
-	if err := lifecycle.SupersedeAllActiveCVEs(ctx, db, endpointName, releaseName, syncedAt); err != nil {
-		return fmt.Errorf("failed to supersede old records: %w", err)
-	}
-
-	// Step 2: Create audit records for current snapshot version.
-	// Any records closed in Step 0 that are present here will be "resurrected" (marked active)
-	// by CreateOrUpdateLifecycleRecord.
+	// Create/resurrect audit records for current snapshot version
 	for _, cve := range sbomCVEs {
 		disclosedAfter := !cve.Published.IsZero() && cve.Published.After(syncedAt)
 
@@ -409,7 +408,6 @@ func processSBOMForRelease(ctx context.Context, db database.DBConnection, sbomDa
 	edge := map[string]interface{}{"_from": releaseID, "_to": sbomID}
 	db.Collections["release2sbom"].CreateDocument(ctx, edge)
 
-	// FIX: Use the exported SBOM package function instead of duplicated local logic
 	if err := sbom.ProcessSBOMComponents(ctx, db, *sbomData, sbomID); err != nil {
 		fmt.Printf("Error processing SBOM components: %v\n", err)
 		return false

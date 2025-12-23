@@ -35,6 +35,6 @@ type CVEInfo struct {
 	SeverityRating string
 	SeverityScore  float64
 	Published      time.Time
-	ReleaseName    string // ADDED: Context for lifecycle identification
-	ReleaseVersion string // ADDED: Context for lifecycle identification
+	ReleaseName    string // Context for lifecycle identification
+	ReleaseVersion string // Context for lifecycle identification
 }
