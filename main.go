@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2/middleware/compress"
 	"github.com/gofiber/fiber/v2/middleware/cors"
 	"github.com/gofiber/fiber/v2/middleware/logger"
 	fiberrecover "github.com/gofiber/fiber/v2/middleware/recover"
@@ -79,6 +80,9 @@ func main() {
 
 	// Middleware
 	app.Use(fiberrecover.New())
+	app.Use(compress.New(compress.Config{
+		Level: compress.LevelBestSpeed,
+	}))
 
 	// Default GraphQL Operation Name to "-" to handle OPTIONS/other requests gracefully
 	app.Use(func(c *fiber.Ctx) error {
