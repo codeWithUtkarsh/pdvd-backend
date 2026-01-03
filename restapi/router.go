@@ -75,10 +75,12 @@ func SetupRoutes(app *fiber.App, db database.DBConnection) {
 	// ========================================================================
 	// RBAC MANAGEMENT ENDPOINTS (Admin only)
 	// ========================================================================
+	// Consolidated all RBAC routes here from rbac_routes.go
 	rbac := api.Group("/rbac", auth.RequireAuth, auth.RequireRole("admin"))
 	rbac.Post("/apply/content", auth.ApplyRBACFromBody(db, emailConfig))
 	rbac.Post("/apply/upload", auth.ApplyRBACFromUpload(db, emailConfig))
-	rbac.Post("/apply", auth.ApplyRBACFromFile(db, emailConfig))
+	rbac.Post("/apply", auth.ApplyRBACFromFile(db, emailConfig)) // Acts as /apply/file
+	rbac.Post("/validate", auth.ValidateRBAC(db))                // Migrated from rbac_routes.go
 	rbac.Get("/config", auth.GetRBACConfig(db))
 	rbac.Get("/invitations", auth.ListPendingInvitationsHandler(db))
 

@@ -478,7 +478,9 @@ func BootstrapAdmin(db database.DBConnection) error {
 		return nil
 	}
 
-	fmt.Println("No users found, creating bootstrap admin...")
+	fmt.Println("\n" + strings.Repeat("=", 72))
+	fmt.Println("🔐 BOOTSTRAP ADMIN ACCOUNT")
+	fmt.Println(strings.Repeat("=", 72))
 
 	adminUsername := os.Getenv("ADMIN_USERNAME")
 	if adminUsername == "" {
@@ -487,8 +489,12 @@ func BootstrapAdmin(db database.DBConnection) error {
 
 	adminPassword := os.Getenv("ADMIN_PASSWORD")
 	if adminPassword == "" {
-		adminPassword = "admin123"
-		fmt.Println("WARNING: Using default admin password. Set ADMIN_PASSWORD environment variable!")
+		// Generate a secure random password if not provided
+		randomPass, err := GenerateSecureToken(32)
+		if err != nil {
+			return fmt.Errorf("failed to generate admin password: %w", err)
+		}
+		adminPassword = randomPass
 	}
 
 	adminEmail := os.Getenv("ADMIN_EMAIL")
@@ -513,8 +519,14 @@ func BootstrapAdmin(db database.DBConnection) error {
 		return fmt.Errorf("failed to create bootstrap admin: %w", err)
 	}
 
-	fmt.Printf("Bootstrap admin created successfully: %s\n", adminUsername)
-	fmt.Println("IMPORTANT: Change the admin password immediately!")
+	fmt.Println(strings.Repeat("=", 72))
+	fmt.Println("✅ Bootstrap admin created successfully!")
+	fmt.Println(strings.Repeat("=", 72))
+	fmt.Printf("\nUsername: %s\n", adminUsername)
+	fmt.Printf("Password: %s\n\n", adminPassword)
+	fmt.Println("⚠️  IMPORTANT: Change the admin password immediately!")
+	fmt.Println("             Set ADMIN_PASSWORD environment variable for production!")
+	fmt.Println(strings.Repeat("=", 72) + "\n")
 
 	return nil
 }

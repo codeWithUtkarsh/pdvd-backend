@@ -164,8 +164,8 @@ func InitializeDatabase() DBConnection {
 	//
 
 	collections = make(map[string]arangodb.Collection)
-	// Added "users" and "invitations" for user management
-	collectionNames := []string{"release", "sbom", "purl", "cve", "endpoint", "sync", "metadata", "cve_lifecycle", "users", "invitations"}
+	// Added "users", "invitations", "roles", and "orgs" for user management
+	collectionNames := []string{"release", "sbom", "purl", "cve", "endpoint", "sync", "metadata", "cve_lifecycle", "users", "invitations", "roles", "orgs"}
 
 	for _, collectionName := range collectionNames {
 		var col arangodb.Collection

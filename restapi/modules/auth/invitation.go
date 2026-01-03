@@ -97,6 +97,7 @@ func AcceptInvitation(ctx context.Context, db database.DBConnection, token, pass
 	}
 
 	// Update user
+	// FIXED: Added is_active: true to the update payload
 	now := time.Now()
 	query := `
 		FOR u IN users 
@@ -104,6 +105,7 @@ func AcceptInvitation(ctx context.Context, db database.DBConnection, token, pass
 		UPDATE u WITH {
 			password_hash: @password_hash,
 			status: "active",
+			is_active: true,
 			updated_at: @updated_at
 		} IN users
 		RETURN NEW

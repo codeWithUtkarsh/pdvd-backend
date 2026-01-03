@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/arangodb/go-driver/v2/arangodb"
 	"github.com/gofiber/fiber/v2"
 	"github.com/ortelius/pdvd-backend/v12/database"
 	"github.com/ortelius/pdvd-backend/v12/model"
@@ -18,20 +20,27 @@ import (
 // RBAC HANDLERS (Fiber)
 // ============================================================================
 
-// ApplyRBACFromBody applies RBAC config from request body
+// ApplyRBACFromBody applies RBAC config from request body (YAML only)
 func ApplyRBACFromBody(db database.DBConnection, emailConfig *EmailConfig) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		var req struct {
-			Config string `json:"config"`
-		}
+		contentType := string(c.Request().Header.ContentType())
 
-		if err := c.BodyParser(&req); err != nil {
+		if !strings.Contains(contentType, "application/x-yaml") &&
+			!strings.Contains(contentType, "text/yaml") &&
+			!strings.Contains(contentType, "application/yaml") {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "Invalid request body",
+				"error": "Content-Type must be application/x-yaml",
 			})
 		}
 
-		config, err := LoadPeriobolosConfig(req.Config)
+		yamlContent := string(c.Body())
+		if yamlContent == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "RBAC config cannot be empty",
+			})
+		}
+
+		config, err := LoadPeriobolosConfig(yamlContent)
 		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 				"error": fmt.Sprintf("Invalid RBAC config: %v", err),
@@ -46,10 +55,79 @@ func ApplyRBACFromBody(db database.DBConnection, emailConfig *EmailConfig) fiber
 		}
 
 		return c.JSON(fiber.Map{
-			"message": "RBAC applied successfully",
-			"result":  result,
+			"success":     true,
+			"message":     "RBAC applied successfully",
+			"result":      result,
+			"invitations": buildInvitationLinks(result.Invitations, emailConfig),
+			"summary": fiber.Map{
+				"orgs_created":  len(result.OrgsCreated),
+				"orgs_updated":  len(result.OrgsUpdated),
+				"users_created": len(result.Created),
+				"users_updated": len(result.Updated),
+				"users_removed": len(result.Removed),
+				"invited":       len(result.Invited),
+			},
 		})
 	}
+}
+
+// ValidateRBAC validates RBAC config without applying changes
+func ValidateRBAC(db database.DBConnection) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		yamlContent := string(c.Body())
+		if yamlContent == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"valid": false,
+				"error": "RBAC config cannot be empty",
+			})
+		}
+
+		config, err := LoadPeriobolosConfig(yamlContent)
+		if err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"valid": false,
+				"error": err.Error(),
+			})
+		}
+
+		ctx := context.Background()
+		orgMapInYAML := make(map[string]bool)
+		for _, org := range config.Orgs {
+			orgMapInYAML[org.Name] = true
+		}
+
+		for _, user := range config.Users {
+			for _, orgName := range user.Orgs {
+				// Rule: User orgs must exist in current YAML or database
+				if orgMapInYAML[orgName] {
+					continue
+				}
+				if _, err := getOrgByName(ctx, db, orgName); err != nil {
+					return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+						"valid": false,
+						"error": fmt.Sprintf("User %s references undefined org: %s", user.Username, orgName),
+					})
+				}
+			}
+		}
+
+		return c.JSON(fiber.Map{
+			"valid": true,
+			"summary": fiber.Map{
+				"orgs":  len(config.Orgs),
+				"users": len(config.Users),
+			},
+		})
+	}
+}
+
+// buildInvitationLinks generates invitation links for invited users
+func buildInvitationLinks(invitations map[string]string, emailConfig *EmailConfig) map[string]string {
+	links := make(map[string]string)
+	for username, token := range invitations {
+		links[username] = fmt.Sprintf("%s/invitation/%s", emailConfig.BaseURL, token)
+	}
+	return links
 }
 
 // ApplyRBACFromUpload applies RBAC config from uploaded file
@@ -57,44 +135,31 @@ func ApplyRBACFromUpload(db database.DBConnection, emailConfig *EmailConfig) fib
 	return func(c *fiber.Ctx) error {
 		file, err := c.FormFile("file")
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "No file uploaded",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "No file uploaded"})
 		}
 
 		openedFile, err := file.Open()
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to open file",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to open file"})
 		}
 		defer openedFile.Close()
 
 		yamlContent, err := io.ReadAll(openedFile)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to read file",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to read file"})
 		}
 
 		config, err := LoadPeriobolosConfig(string(yamlContent))
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": fmt.Sprintf("Invalid RBAC config: %v", err),
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
 
 		result, err := ApplyRBAC(db, config, emailConfig)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": fmt.Sprintf("Failed to apply RBAC: %v", err),
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
 
-		return c.JSON(fiber.Map{
-			"message": "RBAC applied successfully from upload",
-			"result":  result,
-		})
+		return c.JSON(fiber.Map{"success": true, "result": result})
 	}
 }
 
@@ -106,64 +171,43 @@ func ApplyRBACFromFile(db database.DBConnection, emailConfig *EmailConfig) fiber
 		}
 
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "Invalid request body",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
 
 		if req.FilePath == "" {
 			req.FilePath = "/etc/pdvd/rbac.yaml"
 		}
 
-		if _, err := os.Stat(req.FilePath); err != nil {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-				"error": fmt.Sprintf("File not found: %s", req.FilePath),
-			})
-		}
-
 		yamlContent, err := os.ReadFile(req.FilePath)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to read file",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to read file"})
 		}
 
 		config, err := LoadPeriobolosConfig(string(yamlContent))
 		if err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": fmt.Sprintf("Invalid RBAC config: %v", err),
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
 
 		result, err := ApplyRBAC(db, config, emailConfig)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": fmt.Sprintf("Failed to apply RBAC: %v", err),
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": err.Error()})
 		}
 
-		return c.JSON(fiber.Map{
-			"message": fmt.Sprintf("RBAC applied successfully from %s", req.FilePath),
-			"result":  result,
-		})
+		return c.JSON(fiber.Map{"success": true, "result": result})
 	}
 }
 
-// GetRBACConfig exports current RBAC configuration
+// GetRBACConfig exports current RBAC configuration from DB to YAML
 func GetRBACConfig(db database.DBConnection) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		config, err := ExportRBACConfig(db)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to export RBAC config",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to export config"})
 		}
 
 		yamlData, err := yaml.Marshal(config)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to marshal config",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to marshal config"})
 		}
 
 		c.Set("Content-Type", "application/x-yaml")
@@ -175,35 +219,49 @@ func GetRBACConfig(db database.DBConnection) fiber.Handler {
 // RBAC LOGIC
 // ============================================================================
 
-// PeriobolosConfig represents the Peribolos-style RBAC configuration
 type PeriobolosConfig struct {
+	Orgs  []OrgDefinition  `yaml:"orgs,omitempty"`
 	Users []PeriobolosUser `yaml:"users"`
+	Roles []RoleDefinition `yaml:"roles,omitempty"`
 }
 
-// PeriobolosUser represents a user in Peribolos config
+type OrgDefinition struct {
+	Name        string            `yaml:"name"`
+	DisplayName string            `yaml:"display_name,omitempty"`
+	Description string            `yaml:"description,omitempty"`
+	Metadata    map[string]string `yaml:"metadata,omitempty"`
+}
+
 type PeriobolosUser struct {
-	Username string   `yaml:"username"`
-	Email    string   `yaml:"email"`
-	Role     string   `yaml:"role"`
-	Orgs     []string `yaml:"orgs,omitempty"`
+	Username     string   `yaml:"username"`
+	Email        string   `yaml:"email"`
+	Role         string   `yaml:"role"`
+	Orgs         []string `yaml:"orgs,omitempty"`
+	AuthProvider string   `yaml:"auth_provider,omitempty"`
 }
 
-// RBACResult represents the result of applying RBAC
+type RoleDefinition struct {
+	Name        string   `yaml:"name"`
+	Description string   `yaml:"description,omitempty"`
+	Permissions []string `yaml:"permissions,omitempty"`
+}
+
 type RBACResult struct {
-	Created []string `json:"created"`
-	Updated []string `json:"updated"`
-	Removed []string `json:"removed"`
-	Invited []string `json:"invited"`
+	OrgsCreated []string          `json:"orgs_created"`
+	OrgsUpdated []string          `json:"orgs_updated"`
+	Created     []string          `json:"created"`
+	Updated     []string          `json:"updated"`
+	Removed     []string          `json:"removed"`
+	Invited     []string          `json:"invited"`
+	Invitations map[string]string `json:"invitations,omitempty"`
 }
 
-// LoadPeriobolosConfig loads and validates RBAC config from YAML string
 func LoadPeriobolosConfig(yamlContent string) (*PeriobolosConfig, error) {
 	var config PeriobolosConfig
 	if err := yaml.Unmarshal([]byte(yamlContent), &config); err != nil {
 		return nil, fmt.Errorf("failed to parse YAML: %w", err)
 	}
 
-	// Validate
 	for i, user := range config.Users {
 		if user.Username == "" {
 			return nil, fmt.Errorf("user at index %d has empty username", i)
@@ -211,31 +269,77 @@ func LoadPeriobolosConfig(yamlContent string) (*PeriobolosConfig, error) {
 		if user.Email == "" {
 			return nil, fmt.Errorf("user %s has empty email", user.Username)
 		}
-		if user.Role == "" {
-			return nil, fmt.Errorf("user %s has empty role", user.Username)
-		}
 		if user.Role != "admin" && user.Role != "editor" && user.Role != "viewer" {
 			return nil, fmt.Errorf("user %s has invalid role: %s", user.Username, user.Role)
 		}
 	}
-
 	return &config, nil
 }
 
-// ApplyRBAC applies the RBAC configuration to the database
+// ApplyRBAC implements Option B4: Read-Only Validation (Create/Update Orgs, No Delete)
 func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *EmailConfig) (*RBACResult, error) {
 	ctx := context.Background()
 	result := &RBACResult{
-		Created: []string{},
-		Updated: []string{},
-		Removed: []string{},
-		Invited: []string{},
+		OrgsCreated: []string{},
+		OrgsUpdated: []string{},
+		Created:     []string{},
+		Updated:     []string{},
+		Removed:     []string{},
+		Invited:     []string{},
+		Invitations: make(map[string]string),
 	}
 
-	// Get existing users
+	// 1. Process orgs from YAML (Rules: Create/Update only, never delete)
+	orgMapInYAML := make(map[string]bool)
+	for _, orgDef := range config.Orgs {
+		orgMapInYAML[orgDef.Name] = true
+		existingOrg, err := getOrgByName(ctx, db, orgDef.Name)
+
+		if err != nil {
+			// Not found - Create
+			newOrg := &model.Org{
+				Name:        orgDef.Name,
+				DisplayName: orgDef.DisplayName,
+				Description: orgDef.Description,
+				Metadata:    orgDef.Metadata,
+				CreatedAt:   time.Now(),
+				UpdatedAt:   time.Now(),
+			}
+			if err := createOrg(ctx, db, newOrg); err != nil {
+				return nil, fmt.Errorf("failed to create org %s: %w", orgDef.Name, err)
+			}
+			result.OrgsCreated = append(result.OrgsCreated, orgDef.Name)
+		} else {
+			// Found - Update display info if changed
+			if existingOrg.DisplayName != orgDef.DisplayName || existingOrg.Description != orgDef.Description {
+				existingOrg.DisplayName = orgDef.DisplayName
+				existingOrg.Description = orgDef.Description
+				existingOrg.Metadata = orgDef.Metadata
+				existingOrg.UpdatedAt = time.Now()
+				if err := updateOrg(ctx, db, existingOrg); err != nil {
+					return nil, fmt.Errorf("failed to update org %s: %w", orgDef.Name, err)
+				}
+				result.OrgsUpdated = append(result.OrgsUpdated, orgDef.Name)
+			}
+		}
+	}
+
+	// 2. Process users and validate org references
+	for _, configUser := range config.Users {
+		for _, orgName := range configUser.Orgs {
+			// Ensure org exists in either YAML definition or current Database
+			if !orgMapInYAML[orgName] {
+				if _, err := getOrgByName(ctx, db, orgName); err != nil {
+					return nil, fmt.Errorf("User %s references undefined org: %s", configUser.Username, orgName)
+				}
+			}
+		}
+	}
+
+	// 3. Source-of-Truth Sync for Users (Uses helpers from handlers.go)
 	existingUsers, err := listUsers(ctx, db)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list existing users: %w", err)
+		return nil, fmt.Errorf("failed to list users: %w", err)
 	}
 
 	existingUserMap := make(map[string]*model.User)
@@ -243,50 +347,34 @@ func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *
 		existingUserMap[u.Username] = u
 	}
 
-	// Process each user in config
 	for _, configUser := range config.Users {
 		existingUser, exists := existingUserMap[configUser.Username]
 
 		if !exists {
-			// Create new user with pending status and send invitation
+			// Create new user in pending state
 			user := model.NewUser(configUser.Username, configUser.Role)
-			user.Email = configUser.Email
-			user.Orgs = configUser.Orgs
-			user.IsActive = false
-			user.Status = "pending"
+			user.Email, user.Orgs, user.IsActive, user.Status = configUser.Email, configUser.Orgs, false, "pending"
 
-			// Generate random password (will be replaced when invitation accepted)
 			randomPass, _ := GenerateSecureToken(32)
-			passwordHash, _ := HashPassword(randomPass)
-			user.PasswordHash = passwordHash
+			hash, _ := HashPassword(randomPass)
+			user.PasswordHash = hash
 
 			if err := createUser(ctx, db, user); err != nil {
 				return nil, fmt.Errorf("failed to create user %s: %w", configUser.Username, err)
 			}
 
-			// Send invitation
-			_, err := CreateInvitation(ctx, db, emailConfig, configUser.Username, configUser.Email, configUser.Role)
-			if err != nil {
-				fmt.Printf("⚠️  Failed to send invitation to %s: %v\n", configUser.Username, err)
-			} else {
+			// Generate invitation for activation
+			inv, err := CreateInvitation(ctx, db, emailConfig, configUser.Username, configUser.Email, configUser.Role)
+			if err == nil {
 				result.Invited = append(result.Invited, configUser.Username)
+				result.Invitations[configUser.Username] = inv.Token
 			}
-
 			result.Created = append(result.Created, configUser.Username)
 		} else {
-			// Update existing user
+			// Update existing user if metadata changed
 			needsUpdate := false
-
-			if existingUser.Email != configUser.Email {
-				existingUser.Email = configUser.Email
-				needsUpdate = true
-			}
-			if existingUser.Role != configUser.Role {
-				existingUser.Role = configUser.Role
-				needsUpdate = true
-			}
-			if !stringSlicesEqual(existingUser.Orgs, configUser.Orgs) {
-				existingUser.Orgs = configUser.Orgs
+			if existingUser.Email != configUser.Email || existingUser.Role != configUser.Role || !stringSlicesEqual(existingUser.Orgs, configUser.Orgs) {
+				existingUser.Email, existingUser.Role, existingUser.Orgs = configUser.Email, configUser.Role, configUser.Orgs
 				needsUpdate = true
 			}
 
@@ -298,22 +386,20 @@ func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *
 				result.Updated = append(result.Updated, configUser.Username)
 			}
 		}
-
-		// Remove from map to track which users to remove
 		delete(existingUserMap, configUser.Username)
 	}
 
-	// Remaining users in map should be removed (not in config)
-	for username := range existingUserMap {
-		// Don't auto-remove users - just report
-		// In production, you might want to deactivate instead
-		fmt.Printf("⚠️  User %s not in config (not removing automatically)\n", username)
+	// Soft-delete (deactivate) users no longer present in YAML
+	for username, user := range existingUserMap {
+		user.IsActive, user.Status, user.UpdatedAt = false, "removed", time.Now()
+		if err := updateUser(ctx, db, user); err == nil {
+			result.Removed = append(result.Removed, username)
+		}
 	}
 
 	return result, nil
 }
 
-// stringSlicesEqual checks if two string slices are equal
 func stringSlicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -324,4 +410,37 @@ func stringSlicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// ============================================================================
+// DATABASE HELPER FUNCTIONS (Corrected for ArangoDB v2)
+// ============================================================================
+
+func getOrgByName(ctx context.Context, db database.DBConnection, name string) (*model.Org, error) {
+	query := `FOR org IN orgs FILTER org.name == @name RETURN org`
+	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
+		BindVars: map[string]interface{}{"name": name},
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close()
+
+	var org model.Org
+	if !cursor.HasMore() {
+		return nil, fmt.Errorf("org not found")
+	}
+	_, err = cursor.ReadDocument(ctx, &org)
+	return &org, err
+}
+
+func createOrg(ctx context.Context, db database.DBConnection, org *model.Org) error {
+	// Access via db.Collections map initialized in database.go
+	_, err := db.Collections["orgs"].CreateDocument(ctx, org)
+	return err
+}
+
+func updateOrg(ctx context.Context, db database.DBConnection, org *model.Org) error {
+	_, err := db.Collections["orgs"].UpdateDocument(ctx, org.Key, org)
+	return err
 }

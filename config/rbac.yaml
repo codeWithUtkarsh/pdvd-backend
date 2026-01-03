@@ -1,10 +1,24 @@
+orgs:
+  - name: acme
+    display_name: "ACME Corporation"
+    description: "Main enterprise customer"
+    metadata:
+      owner: "alice@acme.com"
+      tier: "enterprise"
+  
+  - name: widgets
+    display_name: "Widgets Inc"
+    description: "Manufacturing partner"
+    metadata:
+      owner: "bob@widgets.com"
+      tier: "partner"
+
 users:
   # Global admin - sees all orgs
   - username: admin
     email: admin@deployhub.com
     role: admin
     orgs: []
-    is_active: true
     auth_provider: local
 
   # Org-scoped users
@@ -12,21 +26,18 @@ users:
     email: alice@acme.com
     role: editor
     orgs: ["acme"]
-    is_active: true
     auth_provider: local
 
   - username: bob
     email: bob@widgets.com
     role: editor
     orgs: ["widgets"]
-    is_active: true
     auth_provider: local
 
   - username: carol
     email: carol@contractor.com
     role: viewer
     orgs: ["acme", "widgets"]
-    is_active: true
     auth_provider: local
 
   # Service account with global access
@@ -34,7 +45,6 @@ users:
     email: scanner@deployhub.com
     role: editor
     orgs: []
-    is_active: true
     auth_provider: service_account
 
 roles:

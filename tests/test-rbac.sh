@@ -1,12 +1,12 @@
 #!/bin/bash
-# end-to-end-rbac-test.sh
-# Updated to match the direct routes without the /p prefix
+# test-rbac.sh
+# End-to-end test for RBAC synchronization, invitation, and enforcement.
 
 set -e
 
 if [ $# -lt 1 ]; then
-    echo "❌ Error: Admin token required"
-    echo "Usage: $0 <admin-token> [base-url] [rbac-file]"
+    echo "❌ Error: Admin password required"
+    echo "Usage: $0 <admin-password> [base-url] [rbac-file]"
     exit 1
 fi
 
@@ -22,7 +22,8 @@ NC='\033[0m'
 echo "🚀 Starting Full End-to-End RBAC Test"
 echo "======================================"
 
-# 1. Admin Login (Public endpoint)
+# 1. Admin Login
+# Path: /api/v1/auth/login
 echo "1️⃣  Logging in as bootstrap admin..."
 LOGIN_RESPONSE=$(curl -s -c admin_cookies.txt -X POST \
     "${BASE_URL}/auth/login" \
@@ -35,7 +36,7 @@ if ! echo "$LOGIN_RESPONSE" | jq -e '.username' > /dev/null 2>&1; then
 fi
 echo -e "${GREEN}✅ Admin authenticated as: $(echo "$LOGIN_RESPONSE" | jq -r '.role')${NC}"
 
-# 2. Apply RBAC Configuration (Protected endpoint)
+# 2. Apply RBAC Configuration
 # Path: /api/v1/rbac/apply/content
 echo "2️⃣  Applying RBAC from $RBAC_FILE..."
 if [ ! -f "$RBAC_FILE" ]; then
@@ -53,20 +54,24 @@ if [ "$(echo "$RBAC_RESPONSE" | jq -r '.success // "false"')" != "true" ]; then
     exit 1
 fi
 
+# Summary uses the .summary object from the response
 INVITED_COUNT=$(echo "$RBAC_RESPONSE" | jq -r '.summary.invited')
 echo -e "${GREEN}✅ RBAC applied. Users invited: $INVITED_COUNT${NC}"
 
-# 3. Extract Token and Activate User (Public endpoint)
-FIRST_USER=$(echo "$RBAC_RESPONSE" | jq -r '.details.invited[0] // empty')
+# 3. Extract Token and Activate User
+# FIX: Path updated to .result.invited[0] to match latest backend
+FIRST_USER=$(echo "$RBAC_RESPONSE" | jq -r '.result.invited[0] // empty')
 
 if [ -z "$FIRST_USER" ] || [ "$FIRST_USER" == "null" ]; then
-    echo -e "${YELLOW}ℹ️  No new users were invited. Skipping activation test.${NC}"
+    echo -e "${YELLOW}ℹ️  No new users were invited (they may already exist). Skipping activation test.${NC}"
 else
     TEST_PASS="P@sswordValidation123!"
+    # FIX: Extracting invitation link from the top-level .invitations map
     INV_LINK=$(echo "$RBAC_RESPONSE" | jq -r --arg u "$FIRST_USER" '.invitations[$u]')
     TOKEN=$(basename "$INV_LINK")
 
     echo "3️⃣  Activating account for invited user: $FIRST_USER..."
+    # Path: /api/v1/invitation/:token/accept
     ACTIVATE_RESPONSE=$(curl -s -X POST \
         "${BASE_URL}/invitation/${TOKEN}/accept" \
         -H "Content-Type: application/json" \
@@ -89,7 +94,8 @@ else
         USER_ROLE=$(echo "$USER_LOGIN_RESPONSE" | jq -r '.role')
         echo -e "${GREEN}✅ Login successful. User: $FIRST_USER, Role: $USER_ROLE${NC}"
         
-        # 5. Verifying RBAC enforcement (Protected endpoint)
+        # 5. Verifying RBAC enforcement
+        # Path: /api/v1/rbac/config (Admin Only)
         echo "5️⃣  Verifying RBAC enforcement (Access to /rbac/config)..."
         HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -b user_cookies.txt "${BASE_URL}/rbac/config")
         
@@ -97,7 +103,7 @@ else
             if [ "$HTTP_CODE" == "403" ]; then
                 echo -e "${GREEN}✅ Enforcement verified: Access correctly denied (403)${NC}"
             else
-                echo -e "${RED}❌ Security Failure: Access was NOT denied (HTTP $HTTP_CODE)${NC}"
+                echo -e "${RED}❌ Security Failure: Access was NOT denied for role $USER_ROLE (HTTP $HTTP_CODE)${NC}"
                 exit 1
             fi
         else
