@@ -13,13 +13,14 @@ import (
 
 // ResolveVulnerabilities fetches a list of vulnerabilities with optional limiting.
 // REFACTORED: Now uses release2cve materialized edges instead of complex AQL filtering
-func ResolveVulnerabilities(db database.DBConnection, limit int) ([]map[string]interface{}, error) {
+func ResolveVulnerabilities(db database.DBConnection, limit int, org string) ([]map[string]interface{}, error) {
 	ctx := context.Background()
 
 	// REFACTORED: Use release2cve materialized edges (pre-validated at write-time)
 	query := `
 		LET vulnData = (
 			FOR release IN release
+				FILTER @org == "" OR release.org == @org
 				FOR cve, edge IN 1..1 OUTBOUND release release2cve
 					FILTER cve.database_specific.cvss_base_score != null
 					
@@ -85,6 +86,7 @@ func ResolveVulnerabilities(db database.DBConnection, limit int) ([]map[string]i
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
 		BindVars: map[string]interface{}{
 			"limit": limit,
+			"org":   org,
 		},
 	})
 	if err != nil {

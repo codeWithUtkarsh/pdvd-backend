@@ -196,12 +196,13 @@ func ResolveAffectedEndpoints(db database.DBConnection, name, version string) ([
 }
 
 // ResolveAffectedReleases updated to count unique CVE ID + Package combinations
-func ResolveAffectedReleases(db database.DBConnection, severity string) ([]interface{}, error) {
+func ResolveAffectedReleases(db database.DBConnection, severity string, org string) ([]interface{}, error) {
 	ctx := context.Background()
 	severityScore := util.GetSeverityScore(severity)
 
 	query := `
 		FOR r IN release
+			FILTER @org == "" OR r.org == @org
 			COLLECT name = r.name INTO groupedReleases = r
 
 			LET latestRelease = (
@@ -325,6 +326,7 @@ func ResolveAffectedReleases(db database.DBConnection, severity string) ([]inter
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
 		BindVars: map[string]interface{}{
 			"severityScore": severityScore,
+			"org":           org,
 		},
 	})
 	if err != nil {

@@ -63,10 +63,12 @@ func GetQueryFields(db database.DBConnection, releaseType *graphql.Object, affec
 			Args: graphql.FieldConfigArgument{
 				"severity": &graphql.ArgumentConfig{Type: graphql.NewNonNull(severityType)},
 				"limit":    &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 100},
+				"org":      &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
 			},
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 				severity := p.Args["severity"].(string)
-				return ResolveAffectedReleases(db, strings.ToLower(severity))
+				org := p.Args["org"].(string)
+				return ResolveAffectedReleases(db, strings.ToLower(severity), org)
 			},
 		},
 		"orgAggregatedReleases": &graphql.Field{

@@ -396,7 +396,7 @@ func ResolveEndpointDetails(db database.DBConnection, endpointName string) (map[
 
 // ResolveSyncedEndpoints fetches a list of endpoints that have been synced.
 // REFACTORED: Now uses release2cve materialized edges instead of complex AQL filtering
-func ResolveSyncedEndpoints(db database.DBConnection, limit int) ([]map[string]interface{}, error) {
+func ResolveSyncedEndpoints(db database.DBConnection, limit int, org string) ([]map[string]interface{}, error) {
 	ctx := context.Background()
 
 	// ========================================================================
@@ -427,6 +427,16 @@ func ResolveSyncedEndpoints(db database.DBConnection, limit int) ([]map[string]i
 
 					// Previous is the 2nd (if exists) for Delta calculation
 					LET previous = LENGTH(sortedSyncs) > 1 ? sortedSyncs[1] : null
+
+					// Check Org if filter is present
+					LET releaseDoc = (
+						FOR r IN release
+							FILTER r.name == releaseName AND r.version == current.version
+							LIMIT 1
+							RETURN r
+					)[0]
+
+					FILTER @org == "" OR releaseDoc.org == @org
 					
 					RETURN {
 						name: releaseName,
@@ -435,7 +445,7 @@ func ResolveSyncedEndpoints(db database.DBConnection, limit int) ([]map[string]i
 					}
 			)
 			
-			// Only return endpoints that actually have services
+			// Only return endpoints that actually have services (matching the org filter)
 			FILTER LENGTH(services) > 0
 			
 			// Calculate the last sync time across all services
@@ -478,6 +488,7 @@ func ResolveSyncedEndpoints(db database.DBConnection, limit int) ([]map[string]i
 	cursor, err := db.Database.Query(ctx, inventoryQuery, &arangodb.QueryOptions{
 		BindVars: map[string]interface{}{
 			"limit": limit,
+			"org":   org,
 		},
 	})
 	if err != nil {

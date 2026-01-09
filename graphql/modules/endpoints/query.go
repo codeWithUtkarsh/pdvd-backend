@@ -13,10 +13,12 @@ func GetQueryFields(db database.DBConnection, syncedEndpointType *graphql.Object
 			Type: graphql.NewList(syncedEndpointType),
 			Args: graphql.FieldConfigArgument{
 				"limit": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 1000},
+				"org":   &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
 			},
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 				limit := p.Args["limit"].(int)
-				return ResolveSyncedEndpoints(db, limit)
+				org := p.Args["org"].(string)
+				return ResolveSyncedEndpoints(db, limit, org)
 			},
 		},
 		"endpointDetails": &graphql.Field{

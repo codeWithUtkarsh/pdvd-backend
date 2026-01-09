@@ -84,7 +84,7 @@ func ResolveSeverityDistribution(db database.DBConnection) (interface{}, error) 
 }
 
 // ResolveTopRisks fetches the top risky assets based on current active version snapshots.
-func ResolveTopRisks(db database.DBConnection, assetType string, limit int) (interface{}, error) {
+func ResolveTopRisks(db database.DBConnection, assetType string, limit int, org string) (interface{}, error) {
 	ctx := context.Background()
 	baseSnapshotAQL := `
 		LET latest_syncs = (
@@ -102,6 +102,10 @@ func ResolveTopRisks(db database.DBConnection, assetType string, limit int) (int
 	if assetType == "releases" {
 		query = baseSnapshotAQL + `
 			FOR latest in latest_syncs
+				// Filter by Org
+				LET relDoc = (FOR r IN release FILTER r.name == latest.release AND r.version == latest.version LIMIT 1 RETURN r)[0]
+				FILTER @org == "" OR relDoc.org == @org
+
 				FOR r IN cve_lifecycle
 					FILTER r.endpoint_name == latest.endpoint AND r.release_name == latest.release
 					FILTER r.introduced_version == latest.version AND r.is_remediated == false
@@ -115,6 +119,10 @@ func ResolveTopRisks(db database.DBConnection, assetType string, limit int) (int
 	} else {
 		query = baseSnapshotAQL + `
 			FOR latest in latest_syncs
+				// Filter by Org
+				LET relDoc = (FOR r IN release FILTER r.name == latest.release AND r.version == latest.version LIMIT 1 RETURN r)[0]
+				FILTER @org == "" OR relDoc.org == @org
+
 				FOR r IN cve_lifecycle
 					FILTER r.endpoint_name == latest.endpoint AND r.release_name == latest.release
 					FILTER r.introduced_version == latest.version AND r.is_remediated == false
@@ -128,7 +136,10 @@ func ResolveTopRisks(db database.DBConnection, assetType string, limit int) (int
 	}
 
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
-		BindVars: map[string]interface{}{"limit": limit},
+		BindVars: map[string]interface{}{
+			"limit": limit,
+			"org":   org,
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -146,7 +157,7 @@ func ResolveTopRisks(db database.DBConnection, assetType string, limit int) (int
 }
 
 // ResolveVulnerabilityTrend returns daily counts using temporal logic and case-insensitive severity matching.
-func ResolveVulnerabilityTrend(db database.DBConnection, days int) ([]map[string]interface{}, error) {
+func ResolveVulnerabilityTrend(db database.DBConnection, days int, org string) ([]map[string]interface{}, error) {
 	ctx := context.Background()
 	if days <= 0 {
 		days = 180
@@ -165,9 +176,14 @@ func ResolveVulnerabilityTrend(db database.DBConnection, days int) ([]map[string
 			LET active_versions = (
 				FOR s IN sync
 					FILTER DATE_TIMESTAMP(s.synced_at) <= eod_ts
-					COLLECT endpoint = s.endpoint_name, release = s.release_name INTO groups = s
+					COLLECT endpoint = s.endpoint_name, releaseName = s.release_name INTO groups = s
 					LET latest_for_day = (FOR g IN groups SORT DATE_TIMESTAMP(g.synced_at) DESC LIMIT 1 RETURN g)[0]
-					RETURN { endpoint, release, version: latest_for_day.release_version }
+					
+					// Filter by Org
+					LET relDoc = (FOR r IN release FILTER r.name == latest_for_day.release_name AND r.version == latest_for_day.release_version LIMIT 1 RETURN r)[0]
+					FILTER @org == "" OR relDoc.org == @org
+
+					RETURN { endpoint, release: releaseName, version: latest_for_day.release_version }
 			)
 			
 			// Aggregated counts by severity (case-insensitive)
@@ -202,7 +218,11 @@ func ResolveVulnerabilityTrend(db database.DBConnection, days int) ([]map[string
 	`
 
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
-		BindVars: map[string]interface{}{"now": now.Format(time.RFC3339), "days": days},
+		BindVars: map[string]interface{}{
+			"now":  now.Format(time.RFC3339),
+			"days": days,
+			"org":  org,
+		},
 	})
 	if err != nil {
 		return []map[string]interface{}{}, err
@@ -224,7 +244,7 @@ func ResolveVulnerabilityTrend(db database.DBConnection, days int) ([]map[string
 }
 
 // ResolveDashboardGlobalStatus calculates aggregated vulnerability counts and deltas.
-func ResolveDashboardGlobalStatus(db database.DBConnection, _ int) (map[string]interface{}, error) {
+func ResolveDashboardGlobalStatus(db database.DBConnection, _ int, org string) (map[string]interface{}, error) {
 	ctx := context.Background()
 	windowTime := time.Now().AddDate(0, 0, -30)
 
@@ -233,6 +253,11 @@ func ResolveDashboardGlobalStatus(db database.DBConnection, _ int) (map[string]i
 			RETURN (
 				FOR sync IN sync
 					FILTER DATE_TIMESTAMP(sync.synced_at) <= DATE_TIMESTAMP(ts)
+					
+					// Filter by Org
+					LET relDoc = (FOR r IN release FILTER r.name == sync.release_name AND r.version == sync.release_version LIMIT 1 RETURN r)[0]
+					FILTER @org == "" OR relDoc.org == @org
+
 					COLLECT endpoint = sync.endpoint_name, release = sync.release_name INTO groups = sync
 					LET latest = (FOR g IN groups SORT DATE_TIMESTAMP(g.synced_at) DESC LIMIT 1 RETURN g)[0]
 					RETURN { endpoint, release, version: latest.release_version, snapshot_ts: DATE_TIMESTAMP(ts) }
@@ -298,6 +323,7 @@ func ResolveDashboardGlobalStatus(db database.DBConnection, _ int) (map[string]i
 		BindVars: map[string]interface{}{
 			"now":    time.Now().Format(time.RFC3339),
 			"window": windowTime.Format(time.RFC3339),
+			"org":    org,
 		},
 	})
 	if err != nil {
@@ -313,7 +339,7 @@ func ResolveDashboardGlobalStatus(db database.DBConnection, _ int) (map[string]i
 }
 
 // ResolveMTTR calculates comprehensive metrics using root_introduced_at for cross-version duration accuracy.
-func ResolveMTTR(db database.DBConnection, days int) (map[string]interface{}, error) {
+func ResolveMTTR(db database.DBConnection, days int, org string) (map[string]interface{}, error) {
 	ctx := context.Background()
 	if days <= 0 {
 		days = 180
@@ -333,6 +359,10 @@ func ResolveMTTR(db database.DBConnection, days int) (map[string]interface{}, er
 
 		LET latest_snapshots = (
 			FOR sync IN sync
+				// Filter by Org
+				LET relDoc = (FOR r IN release FILTER r.name == sync.release_name AND r.version == sync.release_version LIMIT 1 RETURN r)[0]
+				FILTER @org == "" OR relDoc.org == @org
+
 				COLLECT endpoint = sync.endpoint_name, release = sync.release_name
 				AGGREGATE latest_ts = MAX(DATE_TIMESTAMP(sync.synced_at))
 				LET version = (FOR s IN sync FILTER s.endpoint_name == endpoint AND s.release_name == release AND DATE_TIMESTAMP(s.synced_at) == latest_ts LIMIT 1 RETURN s.release_version)[0]
@@ -367,6 +397,10 @@ func ResolveMTTR(db database.DBConnection, days int) (map[string]interface{}, er
 				LET remediated_ts = r.remediated_at != null ? DATE_TIMESTAMP(r.remediated_at) : null
 				FILTER remediated_ts != null
 				
+				// Filter by Org
+				LET relDoc = (FOR rel IN release FILTER rel.name == r.release_name AND rel.version == r.introduced_version LIMIT 1 RETURN rel)[0]
+				FILTER @org == "" OR relDoc.org == @org
+
 				LET ep_type = HAS(ep_map, r.endpoint_name) ? ep_map[r.endpoint_name] : "unknown"
 				LET is_high_risk = (ep_type == "mission_asset")
 				
@@ -460,7 +494,7 @@ func ResolveMTTR(db database.DBConnection, days int) (map[string]interface{}, er
 	`
 
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
-		BindVars: map[string]interface{}{"cutoffTimestamp": cutoffTimestamp},
+		BindVars: map[string]interface{}{"cutoffTimestamp": cutoffTimestamp, "org": org},
 	})
 	if err != nil {
 		return nil, err

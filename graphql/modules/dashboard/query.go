@@ -29,11 +29,13 @@ func GetQueryFields(db database.DBConnection) graphql.Fields {
 			Args: graphql.FieldConfigArgument{
 				"limit": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 5},
 				"type":  &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: "endpoints"},
+				"org":   &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
 			},
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 				limit := p.Args["limit"].(int)
 				assetType := p.Args["type"].(string)
-				return ResolveTopRisks(db, assetType, limit)
+				org := p.Args["org"].(string)
+				return ResolveTopRisks(db, assetType, limit, org)
 			},
 		},
 		// Section 4: Trend Line (Total Open Vulnerabilities)
@@ -41,10 +43,12 @@ func GetQueryFields(db database.DBConnection) graphql.Fields {
 			Type: graphql.NewList(VulnerabilityTrendType),
 			Args: graphql.FieldConfigArgument{
 				"days": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 90},
+				"org":  &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
 			},
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 				days := p.Args["days"].(int)
-				return ResolveVulnerabilityTrend(db, days)
+				org := p.Args["org"].(string)
+				return ResolveVulnerabilityTrend(db, days, org)
 			},
 		},
 		// Section 5: Aggregated Endpoint Status with Deltas
@@ -52,10 +56,12 @@ func GetQueryFields(db database.DBConnection) graphql.Fields {
 			Type: DashboardGlobalStatusType,
 			Args: graphql.FieldConfigArgument{
 				"limit": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 100},
+				"org":   &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
 			},
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 				limit := p.Args["limit"].(int)
-				return ResolveDashboardGlobalStatus(db, limit)
+				org := p.Args["org"].(string)
+				return ResolveDashboardGlobalStatus(db, limit, org)
 			},
 		},
 
@@ -69,10 +75,12 @@ func GetQueryFields(db database.DBConnection) graphql.Fields {
 			Args: graphql.FieldConfigArgument{
 				// Default 180 days matches "Rolling 180-day MTTR" from dashboard-layout.md
 				"days": &graphql.ArgumentConfig{Type: graphql.Int, DefaultValue: 180},
+				"org":  &graphql.ArgumentConfig{Type: graphql.String, DefaultValue: ""},
 			},
 			Resolve: func(p graphql.ResolveParams) (interface{}, error) {
 				days := p.Args["days"].(int)
-				return ResolveMTTR(db, days)
+				org := p.Args["org"].(string)
+				return ResolveMTTR(db, days, org)
 			},
 		},
 	}
