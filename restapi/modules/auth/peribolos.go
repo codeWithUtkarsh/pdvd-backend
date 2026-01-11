@@ -89,12 +89,13 @@ func ValidateRBACConfig(config *RBACConfig) error {
 		}
 
 		validRoles := map[string]bool{
+			"owner":  true, // Owner allowed
 			"admin":  true,
 			"editor": true,
 			"viewer": true,
 		}
 		if !validRoles[user.Role] {
-			return fmt.Errorf("user %s has invalid role: %s (must be admin, editor, or viewer)",
+			return fmt.Errorf("user %s has invalid role: %s (must be owner, admin, editor, or viewer)",
 				user.Username, user.Role)
 		}
 
@@ -508,6 +509,11 @@ func BootstrapAdmin(db database.DBConnection) error {
 func EnsureDefaultRoles(db database.DBConnection) error {
 	defaultRoles := []RoleConfig{
 		{
+			Name:        "owner",
+			Permissions: []string{"read", "write", "delete", "admin"},
+			Description: "Organization owner with full system access and billing management",
+		},
+		{
 			Name:        "admin",
 			Permissions: []string{"read", "write", "delete", "admin"},
 			Description: "Full system access with user management capabilities",
@@ -530,7 +536,7 @@ func EnsureDefaultRoles(db database.DBConnection) error {
 		}
 	}
 
-	fmt.Println("Default roles ensured: admin, editor, viewer")
+	fmt.Println("Default roles ensured: owner, admin, editor, viewer")
 	return nil
 }
 

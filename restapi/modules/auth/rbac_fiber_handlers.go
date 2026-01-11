@@ -267,7 +267,7 @@ func LoadPeriobolosConfig(yamlContent string) (*PeriobolosConfig, error) {
 		if user.Email == "" {
 			return nil, fmt.Errorf("user %s has empty email", user.Username)
 		}
-		if user.Role != "admin" && user.Role != "editor" && user.Role != "viewer" {
+		if user.Role != "owner" && user.Role != "admin" && user.Role != "editor" && user.Role != "viewer" {
 			return nil, fmt.Errorf("user %s has invalid role: %s", user.Username, user.Role)
 		}
 	}

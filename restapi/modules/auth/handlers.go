@@ -10,11 +10,158 @@ import (
 	"github.com/gofiber/fiber/v2"
 	"github.com/ortelius/pdvd-backend/v12/database"
 	"github.com/ortelius/pdvd-backend/v12/model"
+	"github.com/ortelius/pdvd-backend/v12/restapi/modules/gitops"
 )
 
 // ============================================================================
 // AUTH HANDLERS
 // ============================================================================
+
+// Signup handles public user registration requests via GitOps flow
+func Signup(db database.DBConnection, emailConfig *EmailConfig) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		var req struct {
+			Username     string `json:"username"`
+			Email        string `json:"email"`
+			FirstName    string `json:"first_name"`
+			LastName     string `json:"last_name"`
+			Organization string `json:"organization"`
+		}
+
+		if err := c.BodyParser(&req); err != nil {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Invalid request body",
+			})
+		}
+
+		// Validation
+		if req.Username == "" || req.Email == "" || req.FirstName == "" || req.LastName == "" || req.Organization == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "All fields are required",
+			})
+		}
+
+		ctx := c.Context()
+
+		// 1. Check if Username or Email already exists (Case-Insensitive)
+		userCheckQuery := `
+			FOR u IN users 
+			FILTER LOWER(u.username) == LOWER(@username) OR LOWER(u.email) == LOWER(@email)
+			LIMIT 1
+			RETURN u
+		`
+		userCursor, err := db.Database.Query(ctx, userCheckQuery, &arangodb.QueryOptions{
+			BindVars: map[string]interface{}{
+				"username": req.Username,
+				"email":    req.Email,
+			},
+		})
+		if err == nil {
+			defer userCursor.Close()
+			if userCursor.HasMore() {
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+					"error": "Username or Email is already in use",
+				})
+			}
+		}
+
+		// 2. Check if Organization Exists (Case-Insensitive)
+		var existingOrgName string
+		orgCheckQuery := `
+			FOR o IN orgs 
+			FILTER LOWER(o.name) == LOWER(@org)
+			LIMIT 1
+			RETURN o.name
+		`
+		orgCursor, err := db.Database.Query(ctx, orgCheckQuery, &arangodb.QueryOptions{
+			BindVars: map[string]interface{}{
+				"org": req.Organization,
+			},
+		})
+
+		if err == nil {
+			defer orgCursor.Close()
+			if orgCursor.HasMore() {
+				// Organization exists - Read the actual name
+				orgCursor.ReadDocument(ctx, &existingOrgName)
+
+				// Attempt to find the owner/admin email for this organization
+				adminEmail, err := getOrgAdminEmail(ctx, db, existingOrgName)
+
+				msg := fmt.Sprintf("Organization '%s' already exists.", existingOrgName)
+				if err == nil && adminEmail != "" {
+					msg += fmt.Sprintf(" Please contact the organization administrator at %s to join.", adminEmail)
+				} else {
+					msg += " Please contact the organization administrator to join."
+				}
+
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{
+					"error": msg,
+				})
+			}
+		}
+
+		// 3. Execute GitOps Workflow
+		updatedYaml, err := gitops.UpdateRBACRepo(req.Username, req.Email, req.FirstName, req.LastName, req.Organization)
+		if err != nil {
+			fmt.Printf("GitOps Error: %v\n", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to process signup request. Please try again later.",
+			})
+		}
+
+		// 4. Apply the Configuration Locally
+		config, err := LoadPeriobolosConfig(updatedYaml)
+		if err != nil {
+			fmt.Printf("Config Load Error: %v\n", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Internal configuration error",
+			})
+		}
+
+		result, err := ApplyRBAC(db, config, emailConfig)
+		if err != nil {
+			fmt.Printf("RBAC Sync Error: %v\n", err)
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to apply account configuration",
+			})
+		}
+
+		fmt.Printf("Signup Complete for %s. Created: %v, Invited: %v\n", req.Username, result.Created, result.Invited)
+
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+			"success": true,
+			"message": "Signup request processed. Configuration updated and invitation sent.",
+		})
+	}
+}
+
+// getOrgAdminEmail finds the email of a user in the org to contact.
+// Prioritizes 'owner', then 'admin', then 'editor', then 'viewer'.
+func getOrgAdminEmail(ctx context.Context, db database.DBConnection, orgName string) (string, error) {
+	query := `
+		FOR u IN users
+			FILTER @orgName IN u.orgs
+			LET score = u.role == 'owner' ? 0 : u.role == 'admin' ? 1 : u.role == 'editor' ? 2 : 3
+			SORT score ASC
+			LIMIT 1
+			RETURN u.email
+	`
+	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
+		BindVars: map[string]interface{}{"orgName": orgName},
+	})
+	if err != nil {
+		return "", err
+	}
+	defer cursor.Close()
+
+	var email string
+	if cursor.HasMore() {
+		_, err := cursor.ReadDocument(ctx, &email)
+		return email, err
+	}
+	return "", fmt.Errorf("no user found for org")
+}
 
 // Login handles user login and sets auth cookie
 func Login(db database.DBConnection) fiber.Handler {
@@ -65,6 +212,7 @@ func Login(db database.DBConnection) fiber.Handler {
 			"message":  "Login successful",
 			"username": user.Username,
 			"role":     user.Role,
+			"orgs":     user.Orgs,
 		})
 	}
 }
@@ -80,8 +228,10 @@ func Logout() fiber.Handler {
 }
 
 // Me returns current authenticated user info
-func Me() fiber.Handler {
+// UPDATED: Now requires DB connection to fetch fresh data
+func Me(db database.DBConnection) fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		// Get username from validated JWT claim
 		username, ok := c.Locals("username").(string)
 		if !ok {
 			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
@@ -89,11 +239,25 @@ func Me() fiber.Handler {
 			})
 		}
 
-		role, _ := c.Locals("role").(string)
+		// Fetch fresh user data from DB to ensure orgs/roles are up to date
+		// This handles cases where a user was added to an org after logging in
+		ctx := c.Context()
+		user, err := getUserByUsername(ctx, db, username)
+		if err != nil {
+			// Fallback to token data if DB fetch fails (unlikely if token is valid)
+			role, _ := c.Locals("role").(string)
+			orgs, _ := c.Locals("orgs").([]string)
+			return c.JSON(fiber.Map{
+				"username": username,
+				"role":     role,
+				"orgs":     orgs,
+			})
+		}
 
 		return c.JSON(fiber.Map{
-			"username": username,
-			"role":     role,
+			"username": user.Username,
+			"role":     user.Role,
+			"orgs":     user.Orgs, // Fresh org list from DB
 		})
 	}
 }
@@ -266,9 +430,9 @@ func CreateUser(db database.DBConnection) fiber.Handler {
 			})
 		}
 
-		if req.Role != "admin" && req.Role != "editor" && req.Role != "viewer" {
+		if req.Role != "owner" && req.Role != "admin" && req.Role != "editor" && req.Role != "viewer" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "Invalid role. Must be admin, editor, or viewer",
+				"error": "Invalid role. Must be owner, admin, editor, or viewer",
 			})
 		}
 
@@ -367,7 +531,7 @@ func UpdateUser(db database.DBConnection) fiber.Handler {
 			user.Email = req.Email
 		}
 		if req.Role != "" {
-			if req.Role != "admin" && req.Role != "editor" && req.Role != "viewer" {
+			if req.Role != "owner" && req.Role != "admin" && req.Role != "editor" && req.Role != "viewer" {
 				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 					"error": "Invalid role",
 				})

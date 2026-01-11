@@ -44,12 +44,17 @@ func SetupRoutes(app *fiber.App, db database.DBConnection) {
 	api := app.Group("/api/v1")
 
 	// ========================================================================
+	// PUBLIC SIGNUP ENDPOINT
+	// ========================================================================
+	api.Post("/signup", auth.Signup(db, emailConfig))
+
+	// ========================================================================
 	// AUTH ENDPOINTS (Public)
 	// ========================================================================
 	authGroup := api.Group("/auth")
 	authGroup.Post("/login", auth.Login(db))
 	authGroup.Post("/logout", auth.Logout())
-	authGroup.Get("/me", auth.Me())
+	authGroup.Get("/me", auth.Me(db)) // UPDATED: Pass db connection here
 	authGroup.Post("/forgot-password", auth.ForgotPassword(db))
 	authGroup.Post("/change-password", auth.ChangePassword(db))
 	authGroup.Post("/refresh", auth.RefreshToken(db))
@@ -75,22 +80,21 @@ func SetupRoutes(app *fiber.App, db database.DBConnection) {
 	// ========================================================================
 	// RBAC MANAGEMENT ENDPOINTS (Admin only)
 	// ========================================================================
-	// Consolidated all RBAC routes here from rbac_routes.go
 	rbac := api.Group("/rbac", auth.RequireAuth, auth.RequireRole("admin"))
 	rbac.Post("/apply/content", auth.ApplyRBACFromBody(db, emailConfig))
 	rbac.Post("/apply/upload", auth.ApplyRBACFromUpload(db, emailConfig))
-	rbac.Post("/apply", auth.ApplyRBACFromFile(db, emailConfig)) // Acts as /apply/file
-	rbac.Post("/validate", auth.ValidateRBAC(db))                // Migrated from rbac_routes.go
+	rbac.Post("/apply", auth.ApplyRBACFromFile(db, emailConfig))
+	rbac.Post("/validate", auth.ValidateRBAC(db))
 	rbac.Get("/config", auth.GetRBACConfig(db))
 	rbac.Get("/invitations", auth.ListPendingInvitationsHandler(db))
 
 	// ========================================================================
-	// RELEASE ENDPOINTS (Supports both guest and authenticated calls)
+	// RELEASE ENDPOINTS
 	// ========================================================================
 	api.Post("/releases", auth.OptionalAuth, releases.PostReleaseWithSBOM(db))
 
 	// ========================================================================
-	// SYNC ENDPOINTS (Supports both guest and authenticated calls)
+	// SYNC ENDPOINTS
 	// ========================================================================
 	api.Post("/sync", auth.OptionalAuth, sync.PostSyncWithEndpoint(db))
 

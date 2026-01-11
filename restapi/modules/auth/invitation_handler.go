@@ -2,18 +2,38 @@
 package auth
 
 import (
+	"fmt"
+	"net/url"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/ortelius/pdvd-backend/v12/database"
 )
 
+// Helper: cleanToken aggressively decodes URL-encoded strings
+func cleanToken(raw string) string {
+	decoded, err := url.QueryUnescape(raw)
+	if err == nil {
+		return decoded
+	}
+	return raw
+}
+
 // GetInvitationHandler handles GET /api/v1/invitation/:token
 func GetInvitationHandler(db database.DBConnection) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		token := c.Params("token")
+		rawToken := c.Params("token")
+		token := cleanToken(rawToken)
+
 		ctx := c.Context()
 		invitation, err := GetInvitation(ctx, db, token)
 		if err != nil {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Invalid or expired invitation"})
+			// Fallback: Try without cleaning if first attempt fails
+			if token != rawToken {
+				invitation, err = GetInvitation(ctx, db, rawToken)
+			}
+			if err != nil {
+				return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "Invalid or expired invitation"})
+			}
 		}
 
 		if invitation.IsExpired() || invitation.IsAccepted() {
@@ -32,12 +52,12 @@ func GetInvitationHandler(db database.DBConnection) fiber.Handler {
 type AcceptInvitationRequest struct {
 	Password        string `json:"password"`
 	PasswordConfirm string `json:"password_confirm"`
+	Token           string `json:"token"`
 }
 
 // AcceptInvitationHandler handles activation and immediate login
 func AcceptInvitationHandler(db database.DBConnection) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		token := c.Params("token")
 		var req AcceptInvitationRequest
 		if err := c.BodyParser(&req); err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid body"})
@@ -47,9 +67,21 @@ func AcceptInvitationHandler(db database.DBConnection) fiber.Handler {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Passwords mismatch"})
 		}
 
+		// Determine token: Body > URL
+		token := req.Token
+		if token == "" {
+			token = c.Params("token")
+		}
+
+		// Clean the token (converts %3D to =, etc.)
+		token = cleanToken(token)
+
+		fmt.Printf("Processing invitation acceptance for token: %s\n", token)
+
 		ctx := c.Context()
 		user, err := AcceptInvitation(ctx, db, token, req.Password)
 		if err != nil {
+			fmt.Printf("AcceptInvitation error: %v\n", err)
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
 
@@ -59,7 +91,6 @@ func AcceptInvitationHandler(db database.DBConnection) fiber.Handler {
 			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Login failed"})
 		}
 
-		// Use helper for consistent cookie configuration
 		SetAuthCookie(c, jwtToken)
 
 		return c.JSON(fiber.Map{
@@ -72,7 +103,7 @@ func AcceptInvitationHandler(db database.DBConnection) fiber.Handler {
 // ResendInvitationHandler handles POST /api/v1/invitation/:token/resend
 func ResendInvitationHandler(db database.DBConnection, emailConfig *EmailConfig) fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		token := c.Params("token")
+		token := cleanToken(c.Params("token"))
 		if token == "" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 				"error": "Invitation token is required",
