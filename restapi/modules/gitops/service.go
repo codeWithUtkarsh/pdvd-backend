@@ -1,3 +1,4 @@
+// Package gitops provides functionality to manage RBAC configuration via a Git repository.
 package gitops
 
 import (
@@ -12,28 +13,36 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-// Local structs to match RBAC YAML structure
+// Config represents the local structure for RBAC YAML parsing.
 type Config struct {
 	Orgs  []Org  `yaml:"orgs,omitempty"`
 	Users []User `yaml:"users"`
 	Roles []Role `yaml:"roles,omitempty"`
 }
 
+// Org represents an organization structure in the YAML config.
 type Org struct {
 	Name        string            `yaml:"name"`
 	DisplayName string            `yaml:"display_name,omitempty"`
 	Description string            `yaml:"description,omitempty"`
 	Metadata    map[string]string `yaml:"metadata,omitempty"`
+	Members     []Member          `yaml:"members,omitempty"`
 }
 
+// Member represents a user member of an organization.
+type Member struct {
+	Username string `yaml:"username"`
+	Role     string `yaml:"role"`
+}
+
+// User represents a user identity structure.
 type User struct {
-	Username     string   `yaml:"username"`
-	Email        string   `yaml:"email"`
-	Role         string   `yaml:"role"`
-	Orgs         []string `yaml:"orgs,omitempty"`
-	AuthProvider string   `yaml:"auth_provider,omitempty"`
+	Username     string `yaml:"username"`
+	Email        string `yaml:"email"`
+	AuthProvider string `yaml:"auth_provider,omitempty"`
 }
 
+// Role represents a role definition structure.
 type Role struct {
 	Name        string   `yaml:"name"`
 	Description string   `yaml:"description,omitempty"`
@@ -41,7 +50,6 @@ type Role struct {
 }
 
 // UpdateRBACRepo clones the remote repo, adds the new user/org, and pushes changes.
-// It returns the updated YAML content string to be applied locally.
 func UpdateRBACRepo(username, email, firstName, lastName, orgName string) (string, error) {
 	repoURL := os.Getenv("RBAC_REPO")
 	token := os.Getenv("RBAC_REPO_TOKEN")
@@ -50,7 +58,6 @@ func UpdateRBACRepo(username, email, firstName, lastName, orgName string) (strin
 		return "", fmt.Errorf("RBAC_REPO and RBAC_REPO_TOKEN environment variables must be set")
 	}
 
-	// Basic Auth using the token
 	authMethod := &http.BasicAuth{
 		Username: "oauth2",
 		Password: token,
@@ -72,7 +79,7 @@ func UpdateRBACRepo(username, email, firstName, lastName, orgName string) (strin
 }
 
 func tryUpdateRepo(repoURL string, authMethod *http.BasicAuth, username, email, firstName, lastName, orgName string) (string, error) {
-	// 1. Clone to a temporary directory
+	// 1. Clone
 	tempDir, err := os.MkdirTemp("", "pdvd-rbac-*")
 	if err != nil {
 		return "", fmt.Errorf("failed to create temp dir: %w", err)
@@ -94,7 +101,7 @@ func tryUpdateRepo(repoURL string, authMethod *http.BasicAuth, username, email, 
 		return "", fmt.Errorf("failed to get worktree: %w", err)
 	}
 
-	// 2. Read and Parse rbac.yaml
+	// 2. Read YAML
 	rbacPath := filepath.Join(tempDir, "rbac.yaml")
 	yamlBytes, err := os.ReadFile(rbacPath)
 	if err != nil {
@@ -110,27 +117,51 @@ func tryUpdateRepo(repoURL string, authMethod *http.BasicAuth, username, email, 
 		return "", fmt.Errorf("failed to parse rbac.yaml: %w", err)
 	}
 
-	// 3. Update the Configuration in Memory
+	// 3. Update Configuration
 	configUpdated := false
 
-	// Ensure Org exists
-	orgExists := false
-	for _, org := range config.Orgs {
-		if org.Name == orgName {
-			orgExists = true
+	// Find or Create Org
+	var targetOrg *Org
+	for i := range config.Orgs {
+		if config.Orgs[i].Name == orgName {
+			targetOrg = &config.Orgs[i]
 			break
 		}
 	}
-	if !orgExists {
-		config.Orgs = append(config.Orgs, Org{
+
+	if targetOrg == nil {
+		// Create new Org with User as Owner
+		newOrg := Org{
 			Name:        orgName,
 			DisplayName: orgName,
 			Description: fmt.Sprintf("Created for %s %s", firstName, lastName),
-		})
+			// Metadata: removed 'owner' redundancy
+			Members: []Member{
+				{Username: username, Role: "owner"},
+			},
+		}
+		config.Orgs = append(config.Orgs, newOrg)
 		configUpdated = true
+	} else {
+		// Check if user is already a member
+		isMember := false
+		for _, m := range targetOrg.Members {
+			if m.Username == username {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			// Add as Viewer to existing Org
+			targetOrg.Members = append(targetOrg.Members, Member{
+				Username: username,
+				Role:     "viewer",
+			})
+			configUpdated = true
+		}
 	}
 
-	// Ensure User exists
+	// Ensure User Identity Exists
 	userExists := false
 	for _, user := range config.Users {
 		if user.Username == username {
@@ -139,17 +170,9 @@ func tryUpdateRepo(repoURL string, authMethod *http.BasicAuth, username, email, 
 		}
 	}
 	if !userExists {
-		role := "viewer"
-		// If the organization was just created (it didn't exist before), make the creator an Owner
-		if !orgExists {
-			role = "owner"
-		}
-
 		config.Users = append(config.Users, User{
 			Username:     username,
 			Email:        email,
-			Role:         role,
-			Orgs:         []string{orgName},
 			AuthProvider: "local",
 		})
 		configUpdated = true
@@ -164,18 +187,17 @@ func tryUpdateRepo(repoURL string, authMethod *http.BasicAuth, username, email, 
 		return string(newYamlBytes), nil
 	}
 
-	// 4. Write back to file system
+	// 4. Write, Commit, Push
 	if err := os.WriteFile(rbacPath, newYamlBytes, 0644); err != nil {
 		return "", fmt.Errorf("failed to write rbac.yaml: %w", err)
 	}
 
-	// 5. Commit
 	_, err = worktree.Add("rbac.yaml")
 	if err != nil {
 		return "", fmt.Errorf("failed to stage changes: %w", err)
 	}
 
-	commitMsg := fmt.Sprintf("feat: onboarding user %s and org %s", username, orgName)
+	commitMsg := fmt.Sprintf("feat: onboarding user %s to org %s", username, orgName)
 	_, err = worktree.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  "PDVD Backend",
@@ -187,7 +209,6 @@ func tryUpdateRepo(repoURL string, authMethod *http.BasicAuth, username, email, 
 		return "", fmt.Errorf("failed to commit changes: %w", err)
 	}
 
-	// 6. Push
 	err = repo.Push(&git.PushOptions{
 		Auth: authMethod,
 	})

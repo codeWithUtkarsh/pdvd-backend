@@ -211,6 +211,7 @@ func Login(db database.DBConnection) fiber.Handler {
 		return c.JSON(fiber.Map{
 			"message":  "Login successful",
 			"username": user.Username,
+			"email":    user.Email,
 			"role":     user.Role,
 			"orgs":     user.Orgs,
 		})
@@ -228,7 +229,6 @@ func Logout() fiber.Handler {
 }
 
 // Me returns current authenticated user info
-// UPDATED: Now requires DB connection to fetch fresh data
 func Me(db database.DBConnection) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		// Get username from validated JWT claim
@@ -239,25 +239,20 @@ func Me(db database.DBConnection) fiber.Handler {
 			})
 		}
 
-		// Fetch fresh user data from DB to ensure orgs/roles are up to date
-		// This handles cases where a user was added to an org after logging in
+		// Fetch fresh user data from DB to ensure orgs/roles/email are up to date
 		ctx := c.Context()
 		user, err := getUserByUsername(ctx, db, username)
 		if err != nil {
-			// Fallback to token data if DB fetch fails (unlikely if token is valid)
-			role, _ := c.Locals("role").(string)
-			orgs, _ := c.Locals("orgs").([]string)
-			return c.JSON(fiber.Map{
-				"username": username,
-				"role":     role,
-				"orgs":     orgs,
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to fetch user profile",
 			})
 		}
 
 		return c.JSON(fiber.Map{
 			"username": user.Username,
+			"email":    user.Email,
 			"role":     user.Role,
-			"orgs":     user.Orgs, // Fresh org list from DB
+			"orgs":     user.Orgs,
 		})
 	}
 }

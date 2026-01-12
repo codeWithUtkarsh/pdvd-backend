@@ -68,7 +68,7 @@ func ApplyRBACFromBody(db database.DBConnection, emailConfig *EmailConfig) fiber
 }
 
 // ValidateRBAC validates RBAC config without applying changes
-func ValidateRBAC(db database.DBConnection) fiber.Handler {
+func ValidateRBAC(_ database.DBConnection) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		yamlContent := string(c.Body())
 		if yamlContent == "" {
@@ -86,22 +86,18 @@ func ValidateRBAC(db database.DBConnection) fiber.Handler {
 			})
 		}
 
-		ctx := context.Background()
-		orgMapInYAML := make(map[string]bool)
-		for _, org := range config.Orgs {
-			orgMapInYAML[org.Name] = true
+		// Validation for Option 2: Check if users in members list exist in users definition
+		userMap := make(map[string]bool)
+		for _, user := range config.Users {
+			userMap[user.Username] = true
 		}
 
-		for _, user := range config.Users {
-			for _, orgName := range user.Orgs {
-				// Rule: User orgs must exist in current YAML or database
-				if orgMapInYAML[orgName] {
-					continue
-				}
-				if _, err := getOrgByName(ctx, db, orgName); err != nil {
+		for _, org := range config.Orgs {
+			for _, member := range org.Members {
+				if !userMap[member.Username] {
 					return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 						"valid": false,
-						"error": fmt.Sprintf("User %s references undefined org: %s", user.Username, orgName),
+						"error": fmt.Sprintf("Organization %s references undefined user: %s", org.Name, member.Username),
 					})
 				}
 			}
@@ -224,15 +220,21 @@ type OrgDefinition struct {
 	DisplayName string            `yaml:"display_name,omitempty"`
 	Description string            `yaml:"description,omitempty"`
 	Metadata    map[string]string `yaml:"metadata,omitempty"`
+	Members     []OrgMember       `yaml:"members,omitempty"` // Added Members list
+}
+
+// OrgMember represents a user member within an organization
+type OrgMember struct {
+	Username string `yaml:"username"`
+	Role     string `yaml:"role"`
 }
 
 // PeriobolosUser represents a user configuration in the RBAC system
 type PeriobolosUser struct {
-	Username     string   `yaml:"username"`
-	Email        string   `yaml:"email"`
-	Role         string   `yaml:"role"`
-	Orgs         []string `yaml:"orgs,omitempty"`
-	AuthProvider string   `yaml:"auth_provider,omitempty"`
+	Username     string `yaml:"username"`
+	Email        string `yaml:"email"`
+	AuthProvider string `yaml:"auth_provider,omitempty"`
+	// Note: Role and Orgs are removed from User definition in this schema option
 }
 
 // RoleDefinition represents a role configuration with associated permissions
@@ -259,22 +261,26 @@ func LoadPeriobolosConfig(yamlContent string) (*PeriobolosConfig, error) {
 	if err := yaml.Unmarshal([]byte(yamlContent), &config); err != nil {
 		return nil, fmt.Errorf("failed to parse YAML: %w", err)
 	}
-
-	for i, user := range config.Users {
-		if user.Username == "" {
-			return nil, fmt.Errorf("user at index %d has empty username", i)
-		}
-		if user.Email == "" {
-			return nil, fmt.Errorf("user %s has empty email", user.Username)
-		}
-		if user.Role != "owner" && user.Role != "admin" && user.Role != "editor" && user.Role != "viewer" {
-			return nil, fmt.Errorf("user %s has invalid role: %s", user.Username, user.Role)
-		}
-	}
 	return &config, nil
 }
 
-// ApplyRBAC implements Option B4: Read-Only Validation (Create/Update Orgs, No Delete)
+// Helper to rank roles for flattening to DB model
+func getRoleRank(role string) int {
+	switch role {
+	case "owner":
+		return 4
+	case "admin":
+		return 3
+	case "editor":
+		return 2
+	case "viewer":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// ApplyRBAC implements Option 2: Org-Centric Sync
 func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *EmailConfig) (*RBACResult, error) {
 	ctx := context.Background()
 	result := &RBACResult{
@@ -287,14 +293,15 @@ func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *
 		Invitations: make(map[string]string),
 	}
 
-	// 1. Process orgs from YAML (Rules: Create/Update only, never delete)
-	orgMapInYAML := make(map[string]bool)
-	for _, orgDef := range config.Orgs {
-		orgMapInYAML[orgDef.Name] = true
-		existingOrg, err := getOrgByName(ctx, db, orgDef.Name)
+	// 1. Process Orgs & Build User Permissions Map
+	// We iterate through orgs to find membership and calculate the highest role per user
+	userOrgMap := make(map[string][]string)
+	userMaxRole := make(map[string]string)
 
+	for _, orgDef := range config.Orgs {
+		// Sync Org DB Record
+		existingOrg, err := getOrgByName(ctx, db, orgDef.Name)
 		if err != nil {
-			// Not found - Create
 			newOrg := &model.Org{
 				Name:        orgDef.Name,
 				DisplayName: orgDef.DisplayName,
@@ -307,8 +314,7 @@ func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *
 				return nil, fmt.Errorf("failed to create org %s: %w", orgDef.Name, err)
 			}
 			result.OrgsCreated = append(result.OrgsCreated, orgDef.Name)
-		} else if existingOrg.DisplayName != orgDef.DisplayName || existingOrg.Description != orgDef.Description {
-			// Found - Update display info if changed
+		} else {
 			existingOrg.DisplayName = orgDef.DisplayName
 			existingOrg.Description = orgDef.Description
 			existingOrg.Metadata = orgDef.Metadata
@@ -318,21 +324,21 @@ func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *
 			}
 			result.OrgsUpdated = append(result.OrgsUpdated, orgDef.Name)
 		}
-	}
 
-	// 2. Process users and validate org references
-	for _, configUser := range config.Users {
-		for _, orgName := range configUser.Orgs {
-			// Ensure org exists in either YAML definition or current Database
-			if !orgMapInYAML[orgName] {
-				if _, err := getOrgByName(ctx, db, orgName); err != nil {
-					return nil, fmt.Errorf("user %s references undefined org: %s", configUser.Username, orgName)
-				}
+		// Map Users to this Org and calculate their max role
+		for _, member := range orgDef.Members {
+			userOrgMap[member.Username] = append(userOrgMap[member.Username], orgDef.Name)
+
+			currentRank := getRoleRank(userMaxRole[member.Username])
+			newRank := getRoleRank(member.Role)
+
+			if newRank > currentRank {
+				userMaxRole[member.Username] = member.Role
 			}
 		}
 	}
 
-	// 3. Source-of-Truth Sync for Users
+	// 2. Sync Users (Iterate over the Identity list in YAML)
 	existingUsers, err := listUsers(ctx, db)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list users: %w", err)
@@ -344,50 +350,73 @@ func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *
 	}
 
 	for _, configUser := range config.Users {
-		existingUser, exists := existingUserMap[configUser.Username]
+		username := configUser.Username
+		orgs := userOrgMap[username]
+		if orgs == nil {
+			orgs = []string{}
+		}
+
+		role := userMaxRole[username]
+		if role == "" {
+			role = "viewer" // Default role if user is defined but has no org memberships
+		}
+
+		existingUser, exists := existingUserMap[username]
 
 		if !exists {
-			// Create new user in pending state
-			user := model.NewUser(configUser.Username, configUser.Role)
-			user.Email, user.Orgs, user.IsActive, user.Status = configUser.Email, configUser.Orgs, false, "pending"
+			// Create User
+			user := model.NewUser(username, role)
+			user.Email = configUser.Email
+			user.Orgs = orgs
+			user.IsActive = false
+			user.Status = "pending"
+			user.AuthProvider = configUser.AuthProvider
+			if user.AuthProvider == "" {
+				user.AuthProvider = "local"
+			}
 
 			randomPass, _ := GenerateSecureToken(32)
 			hash, _ := HashPassword(randomPass)
 			user.PasswordHash = hash
 
 			if err := createUser(ctx, db, user); err != nil {
-				return nil, fmt.Errorf("failed to create user %s: %w", configUser.Username, err)
+				return nil, fmt.Errorf("failed to create user %s: %w", username, err)
 			}
 
-			// Generate invitation for activation
-			inv, err := CreateInvitation(ctx, db, emailConfig, configUser.Username, configUser.Email, configUser.Role)
+			// Invitation
+			inv, err := CreateInvitation(ctx, db, emailConfig, username, user.Email, role)
 			if err == nil {
-				result.Invited = append(result.Invited, configUser.Username)
-				result.Invitations[configUser.Username] = inv.Token
+				result.Invited = append(result.Invited, username)
+				result.Invitations[username] = inv.Token
 			}
-			result.Created = append(result.Created, configUser.Username)
+			result.Created = append(result.Created, username)
+
 		} else {
-			// Update existing user if metadata changed
+			// Update User
 			needsUpdate := false
-			if existingUser.Email != configUser.Email || existingUser.Role != configUser.Role || !stringSlicesEqual(existingUser.Orgs, configUser.Orgs) {
-				existingUser.Email, existingUser.Role, existingUser.Orgs = configUser.Email, configUser.Role, configUser.Orgs
+			if existingUser.Email != configUser.Email || existingUser.Role != role || !stringSlicesEqual(existingUser.Orgs, orgs) {
+				existingUser.Email = configUser.Email
+				existingUser.Role = role
+				existingUser.Orgs = orgs
 				needsUpdate = true
 			}
 
 			if needsUpdate {
 				existingUser.UpdatedAt = time.Now()
 				if err := updateUser(ctx, db, existingUser); err != nil {
-					return nil, fmt.Errorf("failed to update user %s: %w", configUser.Username, err)
+					return nil, fmt.Errorf("failed to update user %s: %w", username, err)
 				}
-				result.Updated = append(result.Updated, configUser.Username)
+				result.Updated = append(result.Updated, username)
 			}
 		}
-		delete(existingUserMap, configUser.Username)
+		delete(existingUserMap, username)
 	}
 
-	// Soft-delete (deactivate) users no longer present in YAML
+	// 3. Remove Users not in YAML
 	for username, user := range existingUserMap {
-		user.IsActive, user.Status, user.UpdatedAt = false, "removed", time.Now()
+		user.IsActive = false
+		user.Status = "removed"
+		user.UpdatedAt = time.Now()
 		if err := updateUser(ctx, db, user); err == nil {
 			result.Removed = append(result.Removed, username)
 		}

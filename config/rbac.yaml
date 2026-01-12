@@ -4,57 +4,64 @@ orgs:
     display_name: "ACME Corporation"
     description: "Main enterprise customer"
     metadata:
-      owner: "alice@acme.com"
+      owner: "alice"
       tier: "enterprise"
+    members:
+      - username: alice
+        role: owner
+      - username: carol
+        role: viewer
 
   - name: widgets
     display_name: "Widgets Inc"
     description: "Manufacturing partner"
     metadata:
-      owner: "bob@widgets.com"
+      owner: "bob"
       tier: "partner"
+    members:
+      - username: bob
+        role: owner
+      - username: carol
+        role: viewer
 
 users:
-  # Global admin - sees all orgs
+  # Identity definitions (Auth Provider, Email)
+  # Permissions are derived solely from the 'orgs' block above.
+
   - username: admin
     email: admin@deployhub.com
-    role: admin
-    orgs: []
     auth_provider: local
 
-  # Org-scoped users
   - username: alice
     email: alice@acme.com
-    role: editor
-    orgs: ["acme"]
     auth_provider: local
 
   - username: bob
     email: bob@widgets.com
-    role: editor
-    orgs: ["widgets"]
     auth_provider: local
 
   - username: carol
     email: carol@contractor.com
-    role: viewer
-    orgs: ["acme", "widgets"]
     auth_provider: local
 
-  # Service account with global access
   - username: scanner-bot
     email: scanner@deployhub.com
-    role: editor
-    orgs: []
     auth_provider: service_account
 
 roles:
-  - name: admin
-    description: "Full system access"
+  - name: owner
+    description: "Organization owner with full access and billing management"
     permissions:
-      - "read:*"
+      - "admin:org"
       - "write:*"
+      - "read:*"
+
+  - name: admin
+    description: "System administrator"
+    permissions:
       - "admin:*"
+      - "write:*"
+      - "read:*"
 
   - name: editor
     description: "Can create and modify resources"
