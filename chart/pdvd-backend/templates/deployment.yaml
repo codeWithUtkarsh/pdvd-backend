@@ -54,6 +54,16 @@ spec:
                 secretKeyRef:
                   name: arangodb
                   key: DBPort
+            - name: RBAC_REPO
+              valueFrom:
+                secretKeyRef:
+                  name: rbac
+                  key: RBACRepo
+            - name: RBAC_REPO_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: rbac
+                  key: RBACRepoToken
           ports:
             - name: http
               containerPort: 8080
