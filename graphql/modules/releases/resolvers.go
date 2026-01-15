@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
+	"strings"
 
 	"github.com/arangodb/go-driver/v2/arangodb"
 	"github.com/google/osv-scanner/pkg/models"
@@ -473,15 +474,44 @@ func convertToModelsAffected(allAffected []map[string]interface{}) []models.Affe
 }
 
 // ResolveOrgAggregatedReleases aggregates release data by organization
-func ResolveOrgAggregatedReleases(db database.DBConnection, severity string, userOrgs []string, isAnonymous bool) ([]interface{}, error) {
+// FIXED: Now takes username instead of userOrgs/isAnonymous, fetches user's orgs from DB
+func ResolveOrgAggregatedReleases(db database.DBConnection, severity string, username string) ([]interface{}, error) {
 	ctx := context.Background()
 	severityScore := util.GetSeverityScore(severity)
+
+	// Determine org filter based on authentication status
+	userOrgs := []string{} // Initialize as empty slice, not nil
+	filterByPublic := true // Default to public only
+
+	if username != "" {
+		// User is authenticated - fetch their orgs from database
+		userQuery := `FOR u IN users FILTER u.username == @username LIMIT 1 RETURN u.orgs`
+		cursor, err := db.Database.Query(ctx, userQuery, &arangodb.QueryOptions{
+			BindVars: map[string]interface{}{"username": username},
+		})
+		if err == nil {
+			defer cursor.Close()
+			if cursor.HasMore() {
+				var orgs []string
+				_, readErr := cursor.ReadDocument(ctx, &orgs)
+				if readErr == nil && orgs != nil {
+					for i := range orgs {
+						orgs[i] = strings.ToLower(orgs[i])
+					}
+					userOrgs = orgs
+				}
+			}
+		}
+
+		// If user has no orgs specified, they have global access (empty orgs = see all)
+		filterByPublic = false
+	}
 
 	query := `
 		FOR r IN release
 			FILTER (
-				@isAnonymous == true ? (r.visibility == "public" OR r.visibility == null) : 
-				(LENGTH(@userOrgs) == 0 OR r.org IN @userOrgs)
+				@filter_by_public == true ? (r.is_public == true) : 
+				(LENGTH(@user_orgs) == 0 OR r.org IN @user_orgs)
 			)
 			COLLECT org = r.org INTO groupedReleases = r
 			
@@ -639,9 +669,9 @@ func ResolveOrgAggregatedReleases(db database.DBConnection, severity string, use
 
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
 		BindVars: map[string]interface{}{
-			"severityScore": severityScore,
-			"userOrgs":      userOrgs,
-			"isAnonymous":   isAnonymous,
+			"severityScore":    severityScore,
+			"user_orgs":        userOrgs,
+			"filter_by_public": filterByPublic,
 		},
 	})
 	if err != nil {

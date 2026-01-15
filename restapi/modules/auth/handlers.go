@@ -222,7 +222,19 @@ func Login(db database.DBConnection) fiber.Handler {
 // Logout clears the auth cookie
 func Logout() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		c.ClearCookie("auth_token")
+		// Explicitly overwrite the cookie with expiration in the past
+		// This matches the Path and HttpOnly attributes of SetAuthCookie to ensure deletion
+		c.Cookie(&fiber.Cookie{
+			Name:     "auth_token",
+			Value:    "",
+			Expires:  time.Now().Add(-1 * time.Hour), // Expire in the past
+			MaxAge:   -1,                             // Delete immediately
+			HTTPOnly: true,
+			Secure:   false, // Must match SetAuthCookie
+			SameSite: "Lax", // Must match SetAuthCookie
+			Path:     "/",   // Critical: Must match SetAuthCookie
+		})
+
 		return c.JSON(fiber.Map{
 			"message": "Logged out successfully",
 		})

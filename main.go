@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"os"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/ortelius/pdvd-backend/v12/database"
 	gqlschema "github.com/ortelius/pdvd-backend/v12/graphql"
 	"github.com/ortelius/pdvd-backend/v12/restapi"
+	"github.com/ortelius/pdvd-backend/v12/restapi/modules/auth"
 )
 
 var db database.DBConnection
@@ -45,11 +47,27 @@ func GraphQLHandler(schema graphql.Schema) fiber.Handler {
 		}
 		c.Locals("graphql_op", opName)
 
+		// Create a standard context for GraphQL
+		ctx := context.Background()
+
+		// Extract user info from Fiber Locals (set by OptionalAuth middleware)
+		// and inject it into the GraphQL context
+		if username, ok := c.Locals("username").(string); ok {
+			ctx = context.WithValue(ctx, "username", username)
+		}
+		if role, ok := c.Locals("role").(string); ok {
+			ctx = context.WithValue(ctx, "role", role)
+		}
+		if orgs, ok := c.Locals("orgs").([]string); ok {
+			ctx = context.WithValue(ctx, "orgs", orgs)
+		}
+
 		result := graphql.Do(graphql.Params{
 			Schema:         schema,
 			RequestString:  params.Query,
 			VariableValues: params.Variables,
 			OperationName:  params.OperationName,
+			Context:        ctx, // Pass the authenticated context
 		})
 
 		if len(result.Errors) > 0 {
@@ -112,7 +130,8 @@ func main() {
 	restapi.SetupRoutes(app, db)
 
 	// GraphQL endpoint
-	app.Post("/api/v1/graphql", GraphQLHandler(schema))
+	// Apply OptionalAuth middleware to process the HttpOnly cookie and populate context
+	app.Post("/api/v1/graphql", auth.OptionalAuth(db), GraphQLHandler(schema))
 
 	// Get port from environment or default to 3000
 	port := os.Getenv("MS_PORT")
