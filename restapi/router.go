@@ -12,6 +12,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/cors" // Import CORS middleware
 	"github.com/ortelius/pdvd-backend/v12/database"
 	"github.com/ortelius/pdvd-backend/v12/restapi/modules/auth"
+	"github.com/ortelius/pdvd-backend/v12/restapi/modules/github" // Import GitHub module
 	"github.com/ortelius/pdvd-backend/v12/restapi/modules/releases"
 	"github.com/ortelius/pdvd-backend/v12/restapi/modules/sync"
 )
@@ -21,71 +22,59 @@ func SetupRoutes(app *fiber.App, db database.DBConnection) {
 	// ========================================================================
 	// MIDDLEWARE
 	// ========================================================================
-	// Enable CORS for cross-port communication (frontend:4000 -> backend:3000)
 	app.Use(cors.New(cors.Config{
-		// Allow specific origins (frontend URL).
-		// We include both localhost and 127.0.0.1 to cover different browser resolutions.
 		AllowOrigins:     "http://localhost:3000,http://localhost:4000,http://127.0.0.1:3000,http://127.0.0.1:4000",
 		AllowHeaders:     "Origin, Content-Type, Accept, Authorization, X-Requested-With",
-		AllowCredentials: true, // Required for cookies to be accepted
+		AllowCredentials: true,
 		AllowMethods:     "GET, POST, HEAD, PUT, DELETE, PATCH, OPTIONS",
 	}))
 
-	// Bootstrap admin user on startup (only runs if no users exist)
 	go func() {
 		if err := auth.BootstrapAdmin(db); err != nil {
 			log.Printf("WARNING: Failed to bootstrap admin: %v", err)
 		}
 	}()
 
-	// Ensure default roles exist
 	go func() {
 		if err := auth.EnsureDefaultRoles(db); err != nil {
 			log.Printf("WARNING: Failed to ensure default roles: %v", err)
 		}
 	}()
 
-	// Load email configuration for invitations
 	emailConfig := auth.LoadEmailConfig()
-
-	// Auto-apply RBAC from disk if configured
 	go autoApplyRBACOnStartup(db, emailConfig)
-
-	// Start background cleanup of expired invitations
 	go startInvitationCleanup(db)
 
-	// API group
 	api := app.Group("/api/v1")
 
-	// ========================================================================
-	// PUBLIC SIGNUP ENDPOINT
-	// ========================================================================
+	// Public Routes
 	api.Post("/signup", auth.Signup(db, emailConfig))
 
-	// ========================================================================
-	// AUTH ENDPOINTS (Public)
-	// ========================================================================
+	// Auth Routes
 	authGroup := api.Group("/auth")
 	authGroup.Post("/login", auth.Login(db))
 	authGroup.Post("/logout", auth.Logout())
-	// Updated: Me now implicitly uses optional auth behavior but middleware ensures lookup
 	authGroup.Get("/me", auth.OptionalAuth(db), auth.Me(db))
 	authGroup.Post("/forgot-password", auth.ForgotPassword(db))
 	authGroup.Post("/change-password", auth.RequireAuth(db), auth.ChangePassword(db))
 	authGroup.Post("/refresh", auth.RefreshToken(db))
 
-	// ========================================================================
-	// INVITATION ENDPOINTS (Public)
-	// ========================================================================
+	// GitHub Auth Routes
+	authGroup.Get("/github/login", auth.GitHubLogin)
+	authGroup.Get("/github/callback", auth.GitHubCallback(db))
+
+	// GitHub Integration Routes
+	githubGroup := api.Group("/github", auth.RequireAuth(db))
+	githubGroup.Get("/repos", github.ListRepos(db))
+	githubGroup.Post("/onboard", github.OnboardRepos(db))
+
+	// Invitation Routes
 	invitationGroup := api.Group("/invitation")
 	invitationGroup.Get("/:token", auth.GetInvitationHandler(db))
 	invitationGroup.Post("/:token/accept", auth.AcceptInvitationHandler(db))
 	invitationGroup.Post("/:token/resend", auth.ResendInvitationHandler(db, emailConfig))
 
-	// ========================================================================
-	// USER MANAGEMENT ENDPOINTS (Admin only)
-	// ========================================================================
-	// Updated: Pass db to RequireAuth
+	// User Management (Admin)
 	userGroup := api.Group("/users", auth.RequireAuth(db), auth.RequireRole("admin"))
 	userGroup.Get("/", auth.ListUsers(db))
 	userGroup.Post("/", auth.CreateUser(db))
@@ -93,69 +82,49 @@ func SetupRoutes(app *fiber.App, db database.DBConnection) {
 	userGroup.Put("/:username", auth.UpdateUser(db))
 	userGroup.Delete("/:username", auth.DeleteUser(db))
 
-	// ========================================================================
-	// RBAC MANAGEMENT ENDPOINTS (Admin only)
-	// ========================================================================
-	// Updated: Pass db to RequireAuth
+	// RBAC Management (Admin)
 	rbac := api.Group("/rbac", auth.RequireAuth(db), auth.RequireRole("admin"))
 	rbac.Post("/apply/content", auth.ApplyRBACFromBody(db, emailConfig))
 	rbac.Post("/apply/upload", auth.ApplyRBACFromUpload(db, emailConfig))
 	rbac.Post("/apply", auth.ApplyRBACFromFile(db, emailConfig))
-	rbac.Post("/validate", auth.HandleRBACValidate(db)) // Fixed: Use HandleRBACValidate from handler
+	rbac.Post("/validate", auth.HandleRBACValidate(db))
 	rbac.Get("/config", auth.GetRBACConfig(db))
 	rbac.Get("/invitations", auth.ListPendingInvitationsHandler(db))
 
-	// ========================================================================
-	// RELEASE ENDPOINTS
-	// ========================================================================
-	// Updated: Pass db to OptionalAuth
+	// Release & Sync
 	api.Post("/releases", auth.OptionalAuth(db), releases.PostReleaseWithSBOM(db))
-
-	// ========================================================================
-	// SYNC ENDPOINTS
-	// ========================================================================
-	// Updated: Pass db to OptionalAuth
 	api.Post("/sync", auth.OptionalAuth(db), sync.PostSyncWithEndpoint(db))
 
 	log.Println("API routes initialized successfully")
 }
 
-// startInvitationCleanup runs a background ticker to remove expired invitations
 func startInvitationCleanup(db database.DBConnection) {
-	// Run immediately on startup
 	runCleanup(db)
-
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
-
 	for range ticker.C {
 		runCleanup(db)
 	}
 }
 
-// runCleanup executes the database removal logic for expired invitations
 func runCleanup(db database.DBConnection) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-
 	count, err := auth.CleanupExpiredInvitations(ctx, db)
 	if err != nil {
 		fmt.Printf("⚠️  Background Task: Failed to cleanup expired invitations: %v\n", err)
 		return
 	}
-
 	if count > 0 {
 		fmt.Printf("🧹 Background Task: Cleaned up %d expired invitations\n", count)
 	}
 }
 
-// autoApplyRBACOnStartup applies RBAC from file if it exists
 func autoApplyRBACOnStartup(db database.DBConnection, emailConfig *auth.EmailConfig) {
 	configPath := os.Getenv("RBAC_CONFIG_PATH")
 	if configPath == "" {
 		configPath = "/etc/pdvd/rbac.yaml"
 	}
-
 	if _, err := os.Stat(configPath); err == nil {
 		fmt.Println("🔄 Auto-applying RBAC configuration from:", configPath)
 		config, err := auth.LoadPeriobolosConfig(configPath)
@@ -163,13 +132,11 @@ func autoApplyRBACOnStartup(db database.DBConnection, emailConfig *auth.EmailCon
 			fmt.Printf("⚠️  Failed to load RBAC config: %v\n", err)
 			return
 		}
-
 		result, err := auth.ApplyRBAC(db, config, emailConfig)
 		if err != nil {
 			fmt.Printf("⚠️  RBAC apply failed: %v\n", err)
 			return
 		}
-
 		fmt.Printf("✅ RBAC apply complete: %d created, %d updated, %d removed, %d invited\n",
 			len(result.Created), len(result.Updated), len(result.Removed), len(result.Invited))
 	}

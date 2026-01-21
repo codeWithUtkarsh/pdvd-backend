@@ -4,12 +4,15 @@ package auth
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/arangodb/go-driver/v2/arangodb"
 	"github.com/gofiber/fiber/v2"
 	"github.com/ortelius/pdvd-backend/v12/database"
 	"github.com/ortelius/pdvd-backend/v12/model"
+	"github.com/ortelius/pdvd-backend/v12/restapi/modules/github"
 	"github.com/ortelius/pdvd-backend/v12/restapi/modules/gitops"
 )
 
@@ -34,7 +37,6 @@ func Signup(db database.DBConnection, emailConfig *EmailConfig) fiber.Handler {
 			})
 		}
 
-		// Validation
 		if req.Username == "" || req.Email == "" || req.FirstName == "" || req.LastName == "" || req.Organization == "" {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 				"error": "All fields are required",
@@ -43,7 +45,7 @@ func Signup(db database.DBConnection, emailConfig *EmailConfig) fiber.Handler {
 
 		ctx := c.Context()
 
-		// 1. Check if Username or Email already exists (Case-Insensitive)
+		// 1. Check if Username or Email already exists
 		userCheckQuery := `
 			FOR u IN users 
 			FILTER LOWER(u.username) == LOWER(@username) OR LOWER(u.email) == LOWER(@email)
@@ -65,7 +67,7 @@ func Signup(db database.DBConnection, emailConfig *EmailConfig) fiber.Handler {
 			}
 		}
 
-		// 2. Check if Organization Exists (Case-Insensitive)
+		// 2. Check if Organization Exists
 		var existingOrgName string
 		orgCheckQuery := `
 			FOR o IN orgs 
@@ -82,22 +84,15 @@ func Signup(db database.DBConnection, emailConfig *EmailConfig) fiber.Handler {
 		if err == nil {
 			defer orgCursor.Close()
 			if orgCursor.HasMore() {
-				// Organization exists - Read the actual name
 				orgCursor.ReadDocument(ctx, &existingOrgName)
-
-				// Attempt to find the owner/admin email for this organization
 				adminEmail, err := getOrgAdminEmail(ctx, db, existingOrgName)
-
 				msg := fmt.Sprintf("Organization '%s' already exists.", existingOrgName)
 				if err == nil && adminEmail != "" {
 					msg += fmt.Sprintf(" Please contact the organization administrator at %s to join.", adminEmail)
 				} else {
 					msg += " Please contact the organization administrator to join."
 				}
-
-				return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-					"error": msg,
-				})
+				return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": msg})
 			}
 		}
 
@@ -113,18 +108,12 @@ func Signup(db database.DBConnection, emailConfig *EmailConfig) fiber.Handler {
 		// 4. Apply the Configuration Locally
 		config, err := LoadPeriobolosConfig(updatedYaml)
 		if err != nil {
-			fmt.Printf("Config Load Error: %v\n", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Internal configuration error",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Internal configuration error"})
 		}
 
 		result, err := ApplyRBAC(db, config, emailConfig)
 		if err != nil {
-			fmt.Printf("RBAC Sync Error: %v\n", err)
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to apply account configuration",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to apply account configuration"})
 		}
 
 		fmt.Printf("Signup Complete for %s. Created: %v, Invited: %v\n", req.Username, result.Created, result.Invited)
@@ -136,8 +125,6 @@ func Signup(db database.DBConnection, emailConfig *EmailConfig) fiber.Handler {
 	}
 }
 
-// getOrgAdminEmail finds the email of a user in the org to contact.
-// Prioritizes 'owner', then 'admin', then 'editor', then 'viewer'.
 func getOrgAdminEmail(ctx context.Context, db database.DBConnection, orgName string) (string, error) {
 	query := `
 		FOR u IN users
@@ -168,43 +155,30 @@ func Login(db database.DBConnection) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		var req LoginRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "Invalid request body",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
 
 		if req.Username == "" || req.Password == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "Username and password are required",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Username and password are required"})
 		}
 
 		ctx := c.Context()
 		user, err := getUserByUsername(ctx, db, req.Username)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "Invalid credentials",
-			})
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid credentials"})
 		}
 
 		if !user.IsActive {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "Account is inactive",
-			})
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Account is inactive"})
 		}
 
 		if !CheckPasswordHash(req.Password, user.PasswordHash) {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "Invalid credentials",
-			})
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid credentials"})
 		}
 
-		// UPDATED: Only pass username to GenerateJWT
 		token, err := GenerateJWT(user.Username)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to generate token",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to generate token"})
 		}
 
 		SetAuthCookie(c, token)
@@ -222,51 +196,148 @@ func Login(db database.DBConnection) fiber.Handler {
 // Logout clears the auth cookie
 func Logout() fiber.Handler {
 	return func(c *fiber.Ctx) error {
-		// Explicitly overwrite the cookie with expiration in the past
-		// This matches the Path and HttpOnly attributes of SetAuthCookie to ensure deletion
 		c.Cookie(&fiber.Cookie{
 			Name:     "auth_token",
 			Value:    "",
-			Expires:  time.Now().Add(-1 * time.Hour), // Expire in the past
-			MaxAge:   -1,                             // Delete immediately
+			Expires:  time.Now().Add(-1 * time.Hour),
+			MaxAge:   -1,
 			HTTPOnly: true,
-			Secure:   false, // Must match SetAuthCookie
-			SameSite: "Lax", // Must match SetAuthCookie
-			Path:     "/",   // Critical: Must match SetAuthCookie
+			Secure:   false,
+			SameSite: "Lax",
+			Path:     "/",
 		})
+		return c.JSON(fiber.Map{"message": "Logged out successfully"})
+	}
+}
+
+// Me returns current authenticated user info with strict GitHub validation
+func Me(db database.DBConnection) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		username, ok := c.Locals("username").(string)
+		if !ok {
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Not authenticated"})
+		}
+
+		ctx := c.Context()
+		user, err := getUserByUsername(ctx, db, username)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to fetch user profile"})
+		}
+
+		// Validate GitHub connection on profile fetch, so revoked/uninstalled connections
+		// are reflected immediately.
+		githubConnected := false
+		hasInstallationID := user.GitHubInstallationID != ""
+		hasUserToken := user.GitHubToken != ""
+
+		if hasInstallationID || hasUserToken {
+			// Check installation ID first
+			installationValid := false
+			if hasInstallationID {
+				appToken, err := github.GetInstallationToken(user.GitHubInstallationID)
+				if err == nil {
+					// STRICT CHECK: Verify the installation actually has repo access.
+					// If the app is "installed" but has 0 repos allowed, it's effectively disconnected.
+					repos, repoErr := github.FetchRepos(appToken)
+					if repoErr == nil && len(repos) > 0 {
+						installationValid = true
+					} else {
+						// It's a zombie installation or empty permission set. Clear it.
+						fmt.Printf("[DEBUG] GitHub installation ID %s is DEFUNCT (0 repos or fetch error). Clearing.\n", user.GitHubInstallationID)
+						user.GitHubInstallationID = ""
+						installationValid = false
+					}
+				} else if isGitHubRevokedErr(err) {
+					// Installation revoked/uninstalled - clear it
+					fmt.Printf("[DEBUG] GitHub installation ID %s is REVOKED/UNINSTALLED: %v\n", user.GitHubInstallationID, err)
+					user.GitHubInstallationID = ""
+					installationValid = false
+				} else {
+					// Network error - stay optimistic to avoid false positives
+					installationValid = true
+				}
+			}
+
+			// Check user OAuth token
+			userTokenValid := false
+			if hasUserToken {
+				ok, err := validateGitHubUserToken(user.GitHubToken)
+				if err == nil && ok {
+					userTokenValid = true
+				} else if err == nil && !ok {
+					// Token is revoked (401/403) - clear it
+					fmt.Printf("[DEBUG] GitHub user token for %s is REVOKED (401/403)\n", username)
+					user.GitHubToken = ""
+					userTokenValid = false
+				} else {
+					// Network error - assume still valid
+					userTokenValid = true
+				}
+			}
+
+			// PRIORITY LOGIC: If a user explicitly revoked their personal OAuth token (User Token),
+			// we treat the connection as broken even if an App installation still exists on their Org.
+			if hasUserToken && !userTokenValid {
+				githubConnected = false
+			} else {
+				githubConnected = userTokenValid || (hasInstallationID && installationValid)
+			}
+
+			// Sync cleanup to Database immediately if state changed
+			if user.GitHubInstallationID == "" || user.GitHubToken == "" {
+				user.UpdatedAt = time.Now()
+				_ = updateUser(ctx, db, user)
+			}
+		}
 
 		return c.JSON(fiber.Map{
-			"message": "Logged out successfully",
+			"username":         user.Username,
+			"email":            user.Email,
+			"role":             user.Role,
+			"orgs":             user.Orgs,
+			"github_connected": githubConnected,
 		})
 	}
 }
 
-// Me returns current authenticated user info
-func Me(db database.DBConnection) fiber.Handler {
-	return func(c *fiber.Ctx) error {
-		// Get username from validated JWT claim (via middleware)
-		username, ok := c.Locals("username").(string)
-		if !ok {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "Not authenticated",
-			})
-		}
+func isGitHubRevokedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	// Catch all common revocation/uninstallation/not-found status codes
+	return strings.Contains(s, "401") ||
+		strings.Contains(s, "403") ||
+		strings.Contains(s, "404") ||
+		strings.Contains(s, "410") ||
+		strings.Contains(s, "422") ||
+		strings.Contains(s, "revoked") ||
+		strings.Contains(s, "unauthorized")
+}
 
-		// Fetch fresh user data from DB to ensure orgs/roles/email are up to date
-		ctx := c.Context()
-		user, err := getUserByUsername(ctx, db, username)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to fetch user profile",
-			})
-		}
+func validateGitHubUserToken(token string) (bool, error) {
+	req, err := http.NewRequest("GET", "https://api.github.com/user", nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
-		return c.JSON(fiber.Map{
-			"username": user.Username,
-			"email":    user.Email,
-			"role":     user.Role,
-			"orgs":     user.Orgs,
-		})
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return false, nil
+	case http.StatusOK:
+		return true, nil
+	default:
+		// Treat all other statuses as "not proven revoked"
+		return true, nil
 	}
 }
 
@@ -275,26 +346,18 @@ func ForgotPassword(_ database.DBConnection) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		var req ForgotPasswordRequest
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "Invalid request body",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
-
-		// TODO: Implement password reset logic with email
-		return c.JSON(fiber.Map{
-			"message": "Password reset email sent (not implemented yet)",
-		})
+		return c.JSON(fiber.Map{"message": "Password reset email sent (not implemented yet)"})
 	}
 }
 
-// ChangePassword handles password change for authenticated users
+// ChangePassword handles password change
 func ChangePassword(db database.DBConnection) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		username, ok := c.Locals("username").(string)
 		if !ok {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "Authentication required",
-			})
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Authentication required"})
 		}
 
 		var req struct {
@@ -303,50 +366,36 @@ func ChangePassword(db database.DBConnection) fiber.Handler {
 		}
 
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "Invalid request body",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
 
 		if err := ValidatePasswordStrength(req.NewPassword); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": err.Error(),
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
 
 		ctx := c.Context()
 		user, err := getUserByUsername(ctx, db, username)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to get user",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to get user"})
 		}
 
 		if !CheckPasswordHash(req.OldPassword, user.PasswordHash) {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "Invalid old password",
-			})
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid old password"})
 		}
 
 		newHash, err := HashPassword(req.NewPassword)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to hash password",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to hash password"})
 		}
 
 		user.PasswordHash = newHash
 		user.UpdatedAt = time.Now()
 
 		if err := updateUser(ctx, db, user); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to update password",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update password"})
 		}
 
-		return c.JSON(fiber.Map{
-			"message": "Password changed successfully",
-		})
+		return c.JSON(fiber.Map{"message": "Password changed successfully"})
 	}
 }
 
@@ -355,29 +404,18 @@ func RefreshToken(_ database.DBConnection) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		oldToken := c.Cookies("auth_token")
 		if oldToken == "" {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "No token to refresh",
-			})
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "No token to refresh"})
 		}
 
 		newToken, err := RefreshJWT(oldToken)
 		if err != nil {
-			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{
-				"error": "Invalid or expired token",
-			})
+			return c.Status(fiber.StatusUnauthorized).JSON(fiber.Map{"error": "Invalid or expired token"})
 		}
 
 		SetAuthCookie(c, newToken)
-
-		return c.JSON(fiber.Map{
-			"message": "Token refreshed successfully",
-		})
+		return c.JSON(fiber.Map{"message": "Token refreshed successfully"})
 	}
 }
-
-// ============================================================================
-// USER MANAGEMENT HANDLERS (Admin only)
-// ============================================================================
 
 // ListUsers lists all users
 func ListUsers(db database.DBConnection) fiber.Handler {
@@ -385,9 +423,7 @@ func ListUsers(db database.DBConnection) fiber.Handler {
 		ctx := c.Context()
 		users, err := listUsers(ctx, db)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to list users",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to list users"})
 		}
 
 		userList := make([]fiber.Map, len(users))
@@ -421,41 +457,25 @@ func CreateUser(db database.DBConnection) fiber.Handler {
 		}
 
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "Invalid request body",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
 
 		if req.Username == "" || req.Email == "" || req.Password == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "Username, email, and password are required",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Username, email, and password are required"})
 		}
 
 		if err := ValidatePasswordStrength(req.Password); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": err.Error(),
-			})
-		}
-
-		if req.Role != "owner" && req.Role != "admin" && req.Role != "editor" && req.Role != "viewer" {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "Invalid role. Must be owner, admin, editor, or viewer",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": err.Error()})
 		}
 
 		ctx := c.Context()
 		if _, err := getUserByUsername(ctx, db, req.Username); err == nil {
-			return c.Status(fiber.StatusConflict).JSON(fiber.Map{
-				"error": "Username already exists",
-			})
+			return c.Status(fiber.StatusConflict).JSON(fiber.Map{"error": "Username already exists"})
 		}
 
 		passwordHash, err := HashPassword(req.Password)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to hash password",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to hash password"})
 		}
 
 		user := model.NewUser(req.Username, req.Role)
@@ -466,9 +486,7 @@ func CreateUser(db database.DBConnection) fiber.Handler {
 		user.Status = "active"
 
 		if err := createUser(ctx, db, user); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to create user",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to create user"})
 		}
 
 		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
@@ -491,9 +509,7 @@ func GetUser(db database.DBConnection) fiber.Handler {
 
 		user, err := getUserByUsername(ctx, db, username)
 		if err != nil {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-				"error": "User not found",
-			})
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "User not found"})
 		}
 
 		return c.JSON(fiber.Map{
@@ -522,28 +538,19 @@ func UpdateUser(db database.DBConnection) fiber.Handler {
 		}
 
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "Invalid request body",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Invalid request body"})
 		}
 
 		ctx := c.Context()
 		user, err := getUserByUsername(ctx, db, username)
 		if err != nil {
-			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
-				"error": "User not found",
-			})
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{"error": "User not found"})
 		}
 
 		if req.Email != "" {
 			user.Email = req.Email
 		}
 		if req.Role != "" {
-			if req.Role != "owner" && req.Role != "admin" && req.Role != "editor" && req.Role != "viewer" {
-				return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-					"error": "Invalid role",
-				})
-			}
 			user.Role = req.Role
 		}
 		if req.Orgs != nil {
@@ -555,9 +562,7 @@ func UpdateUser(db database.DBConnection) fiber.Handler {
 		user.UpdatedAt = time.Now()
 
 		if err := updateUser(ctx, db, user); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to update user",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to update user"})
 		}
 
 		return c.JSON(fiber.Map{
@@ -577,24 +582,17 @@ func UpdateUser(db database.DBConnection) fiber.Handler {
 func DeleteUser(db database.DBConnection) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		username := c.Params("username")
-
 		currentUser, ok := c.Locals("username").(string)
 		if ok && currentUser == username {
-			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": "Cannot delete your own account",
-			})
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{"error": "Cannot delete your own account"})
 		}
 
 		ctx := c.Context()
 		if err := deleteUser(ctx, db, username); err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
-				"error": "Failed to delete user",
-			})
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{"error": "Failed to delete user"})
 		}
 
-		return c.JSON(fiber.Map{
-			"message": "User deleted successfully",
-		})
+		return c.JSON(fiber.Map{"message": "User deleted successfully"})
 	}
 }
 
@@ -602,21 +600,18 @@ func DeleteUser(db database.DBConnection) fiber.Handler {
 // HELPER FUNCTIONS
 // ============================================================================
 
-// SetAuthCookie sets the auth token cookie in the Fiber context.
-// UPDATED: Added Path="/" and SameSite="Lax" to ensure cross-port localhost compatibility
 func SetAuthCookie(c *fiber.Ctx, token string) {
 	c.Cookie(&fiber.Cookie{
 		Name:     "auth_token",
 		Value:    token,
 		HTTPOnly: true,
-		Secure:   false, // Set to true in production with HTTPS
+		Secure:   false,
 		SameSite: "Lax",
-		MaxAge:   86400, // 24 hours
-		Path:     "/",   // Ensure cookie is valid for entire domain
+		MaxAge:   86400,
+		Path:     "/",
 	})
 }
 
-// getUserByUsername retrieves a user from the database
 func getUserByUsername(ctx context.Context, db database.DBConnection, username string) (*model.User, error) {
 	query := `FOR u IN users FILTER u.username == @username RETURN u`
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
@@ -631,11 +626,9 @@ func getUserByUsername(ctx context.Context, db database.DBConnection, username s
 	if _, err := cursor.ReadDocument(ctx, &user); err != nil {
 		return nil, fmt.Errorf("user not found")
 	}
-
 	return &user, nil
 }
 
-// createUser creates a new user in the database
 func createUser(ctx context.Context, db database.DBConnection, user *model.User) error {
 	query := `
 		INSERT {
@@ -648,28 +641,29 @@ func createUser(ctx context.Context, db database.DBConnection, user *model.User)
 			status: @status,
 			auth_provider: @auth_provider,
 			created_at: @created_at,
-			updated_at: @updated_at
+			updated_at: @updated_at,
+			github_token: @github_token,
+			github_installation_id: @github_installation_id
 		} INTO users
 	`
-
 	bindVars := map[string]interface{}{
-		"username":      user.Username,
-		"email":         user.Email,
-		"password_hash": user.PasswordHash,
-		"role":          user.Role,
-		"orgs":          user.Orgs,
-		"is_active":     user.IsActive,
-		"status":        user.Status,
-		"auth_provider": user.AuthProvider,
-		"created_at":    user.CreatedAt,
-		"updated_at":    user.UpdatedAt,
+		"username":               user.Username,
+		"email":                  user.Email,
+		"password_hash":          user.PasswordHash,
+		"role":                   user.Role,
+		"orgs":                   user.Orgs,
+		"is_active":              user.IsActive,
+		"status":                 user.Status,
+		"auth_provider":          user.AuthProvider,
+		"created_at":             user.CreatedAt,
+		"updated_at":             user.UpdatedAt,
+		"github_token":           user.GitHubToken,
+		"github_installation_id": user.GitHubInstallationID,
 	}
-
 	_, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{BindVars: bindVars})
 	return err
 }
 
-// updateUser updates an existing user in the database
 func updateUser(ctx context.Context, db database.DBConnection, user *model.User) error {
 	query := `
 		FOR u IN users
@@ -681,26 +675,27 @@ func updateUser(ctx context.Context, db database.DBConnection, user *model.User)
 			orgs: @orgs,
 			is_active: @is_active,
 			status: @status,
-			updated_at: @updated_at
+			updated_at: @updated_at,
+			github_token: @github_token,
+			github_installation_id: @github_installation_id
 		} IN users
 	`
-
 	bindVars := map[string]interface{}{
-		"username":      user.Username,
-		"email":         user.Email,
-		"password_hash": user.PasswordHash,
-		"role":          user.Role,
-		"orgs":          user.Orgs,
-		"is_active":     user.IsActive,
-		"status":        user.Status,
-		"updated_at":    user.UpdatedAt,
+		"username":               user.Username,
+		"email":                  user.Email,
+		"password_hash":          user.PasswordHash,
+		"role":                   user.Role,
+		"orgs":                   user.Orgs,
+		"is_active":              user.IsActive,
+		"status":                 user.Status,
+		"updated_at":             user.UpdatedAt,
+		"github_token":           user.GitHubToken,
+		"github_installation_id": user.GitHubInstallationID,
 	}
-
 	_, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{BindVars: bindVars})
 	return err
 }
 
-// deleteUser deletes a user from the database
 func deleteUser(ctx context.Context, db database.DBConnection, username string) error {
 	query := `FOR u IN users FILTER u.username == @username REMOVE u IN users`
 	_, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
@@ -709,7 +704,6 @@ func deleteUser(ctx context.Context, db database.DBConnection, username string) 
 	return err
 }
 
-// listUsers retrieves all users from the database
 func listUsers(ctx context.Context, db database.DBConnection) ([]*model.User, error) {
 	query := `FOR u IN users RETURN u`
 	cursor, err := db.Database.Query(ctx, query, nil)
@@ -725,11 +719,9 @@ func listUsers(ctx context.Context, db database.DBConnection) ([]*model.User, er
 			users = append(users, &user)
 		}
 	}
-
 	return users, nil
 }
 
-// GenerateRandomString generates a secure cryptographically random string for tokens.
 func GenerateRandomString(length int) (string, error) {
 	return GenerateSecureToken(length)
 }
