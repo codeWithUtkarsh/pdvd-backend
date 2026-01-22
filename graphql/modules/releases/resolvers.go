@@ -475,7 +475,7 @@ func convertToModelsAffected(allAffected []map[string]interface{}) []models.Affe
 }
 
 // ResolveOrgAggregatedReleases aggregates release data by organization
-// FIXED: Now takes username instead of userOrgs/isAnonymous, fetches user's orgs from DB
+// FIXED: Removed runtime toLowerCase() conversion - org names are now stored lowercase
 func ResolveOrgAggregatedReleases(db database.DBConnection, severity string, username string) ([]interface{}, error) {
 	ctx := context.Background()
 	severityScore := util.GetSeverityScore(severity)
@@ -496,9 +496,7 @@ func ResolveOrgAggregatedReleases(db database.DBConnection, severity string, use
 				var orgs []string
 				_, readErr := cursor.ReadDocument(ctx, &orgs)
 				if readErr == nil && orgs != nil {
-					for i := range orgs {
-						orgs[i] = strings.ToLower(orgs[i])
-					}
+					// Orgs are already stored lowercase - no conversion needed
 					userOrgs = orgs
 				}
 			}
