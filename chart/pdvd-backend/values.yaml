@@ -1,3 +1,4 @@
+# chart/pdvd-backend/values.yaml
 ---
 replicaCount: 1
 image:
@@ -5,3 +6,10 @@ image:
   tag: main-v10.0.92-g2eebd3
   sha: sha256:6720749f6628a424466140733ee11ce73d600a1b457d76d4d6ec7971b05c00ce
   pullPolicy: Always
+
+github:
+  appId: "2695570"
+  appName: "deployhub-dev"
+  clientId: "Iv23liVE3QJYIS6BGQRa"
+  clientSecret: ""
+  privateKeyFile: ""
