@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/go-git/go-git/v5"
@@ -79,6 +80,10 @@ func UpdateRBACRepo(username, email, firstName, lastName, orgName string) (strin
 }
 
 func tryUpdateRepo(repoURL string, authMethod *http.BasicAuth, username, email, firstName, lastName, orgName string) (string, error) {
+	// Normalize org name to lowercase for internal use
+	normalizedOrgName := strings.ToLower(strings.TrimSpace(orgName))
+	displayName := orgName // Preserve original for display
+
 	// 1. Clone
 	tempDir, err := os.MkdirTemp("", "pdvd-rbac-*")
 	if err != nil {
@@ -120,10 +125,10 @@ func tryUpdateRepo(repoURL string, authMethod *http.BasicAuth, username, email, 
 	// 3. Update Configuration
 	configUpdated := false
 
-	// Find or Create Org
+	// Find or Create Org (using normalized name)
 	var targetOrg *Org
 	for i := range config.Orgs {
-		if config.Orgs[i].Name == orgName {
+		if strings.ToLower(config.Orgs[i].Name) == normalizedOrgName {
 			targetOrg = &config.Orgs[i]
 			break
 		}
@@ -132,10 +137,9 @@ func tryUpdateRepo(repoURL string, authMethod *http.BasicAuth, username, email, 
 	if targetOrg == nil {
 		// Create new Org with User as Owner
 		newOrg := Org{
-			Name:        orgName,
-			DisplayName: orgName,
+			Name:        normalizedOrgName, // Lowercase for internal use
+			DisplayName: displayName,       // Original case for display
 			Description: fmt.Sprintf("Created for %s %s", firstName, lastName),
-			// Metadata: removed 'owner' redundancy
 			Members: []Member{
 				{Username: username, Role: "owner"},
 			},
@@ -143,6 +147,17 @@ func tryUpdateRepo(repoURL string, authMethod *http.BasicAuth, username, email, 
 		config.Orgs = append(config.Orgs, newOrg)
 		configUpdated = true
 	} else {
+		// Ensure org name is normalized
+		if targetOrg.Name != normalizedOrgName {
+			targetOrg.Name = normalizedOrgName
+			configUpdated = true
+		}
+		// Preserve display name if it exists, otherwise set it
+		if targetOrg.DisplayName == "" {
+			targetOrg.DisplayName = displayName
+			configUpdated = true
+		}
+
 		// Check if user is already a member
 		isMember := false
 		for _, m := range targetOrg.Members {
@@ -197,7 +212,7 @@ func tryUpdateRepo(repoURL string, authMethod *http.BasicAuth, username, email, 
 		return "", fmt.Errorf("failed to stage changes: %w", err)
 	}
 
-	commitMsg := fmt.Sprintf("feat: onboarding user %s to org %s", username, orgName)
+	commitMsg := fmt.Sprintf("feat: onboarding user %s to org %s", username, normalizedOrgName)
 	_, err = worktree.Commit(commitMsg, &git.CommitOptions{
 		Author: &object.Signature{
 			Name:  "PDVD Backend",

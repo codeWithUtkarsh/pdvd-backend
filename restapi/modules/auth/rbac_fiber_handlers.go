@@ -280,7 +280,7 @@ func getRoleRank(role string) int {
 	}
 }
 
-// ApplyRBAC implements Option 2: Org-Centric Sync
+// ApplyRBAC implements Option 2: Org-Centric Sync with normalized org names
 func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *EmailConfig) (*RBACResult, error) {
 	ctx := context.Background()
 	result := &RBACResult{
@@ -299,35 +299,48 @@ func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *
 	userMaxRole := make(map[string]string)
 
 	for _, orgDef := range config.Orgs {
+		// Normalize org name to lowercase for internal use
+		normalizedOrgName := strings.ToLower(strings.TrimSpace(orgDef.Name))
+		displayName := orgDef.DisplayName
+		if displayName == "" {
+			displayName = orgDef.Name // Use original if no display name provided
+		}
+
 		// Sync Org DB Record
-		existingOrg, err := getOrgByName(ctx, db, orgDef.Name)
+		existingOrg, err := getOrgByName(ctx, db, normalizedOrgName)
 		if err != nil {
 			newOrg := &model.Org{
-				Name:        orgDef.Name,
-				DisplayName: orgDef.DisplayName,
+				Name:        normalizedOrgName, // Store lowercase
+				DisplayName: displayName,        // Store display name
 				Description: orgDef.Description,
 				Metadata:    orgDef.Metadata,
 				CreatedAt:   time.Now(),
 				UpdatedAt:   time.Now(),
 			}
 			if err := createOrg(ctx, db, newOrg); err != nil {
-				return nil, fmt.Errorf("failed to create org %s: %w", orgDef.Name, err)
+				return nil, fmt.Errorf("failed to create org %s: %w", normalizedOrgName, err)
 			}
-			result.OrgsCreated = append(result.OrgsCreated, orgDef.Name)
+			result.OrgsCreated = append(result.OrgsCreated, normalizedOrgName)
 		} else {
-			existingOrg.DisplayName = orgDef.DisplayName
+			// Update existing org
+			existingOrg.DisplayName = displayName
 			existingOrg.Description = orgDef.Description
 			existingOrg.Metadata = orgDef.Metadata
 			existingOrg.UpdatedAt = time.Now()
-			if err := updateOrg(ctx, db, existingOrg); err != nil {
-				return nil, fmt.Errorf("failed to update org %s: %w", orgDef.Name, err)
+			// Ensure name is normalized
+			if existingOrg.Name != normalizedOrgName {
+				existingOrg.Name = normalizedOrgName
 			}
-			result.OrgsUpdated = append(result.OrgsUpdated, orgDef.Name)
+			if err := updateOrg(ctx, db, existingOrg); err != nil {
+				return nil, fmt.Errorf("failed to update org %s: %w", normalizedOrgName, err)
+			}
+			result.OrgsUpdated = append(result.OrgsUpdated, normalizedOrgName)
 		}
 
 		// Map Users to this Org and calculate their max role
 		for _, member := range orgDef.Members {
-			userOrgMap[member.Username] = append(userOrgMap[member.Username], orgDef.Name)
+			// Store normalized org names in user mapping
+			userOrgMap[member.Username] = append(userOrgMap[member.Username], normalizedOrgName)
 
 			currentRank := getRoleRank(userMaxRole[member.Username])
 			newRank := getRoleRank(member.Role)
@@ -356,6 +369,11 @@ func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *
 			orgs = []string{}
 		}
 
+		// Ensure all org names are lowercase
+		for i := range orgs {
+			orgs[i] = strings.ToLower(strings.TrimSpace(orgs[i]))
+		}
+
 		role := userMaxRole[username]
 		if role == "" {
 			role = "viewer" // Default role if user is defined but has no org memberships
@@ -367,7 +385,7 @@ func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *
 			// Create User
 			user := model.NewUser(username, role)
 			user.Email = configUser.Email
-			user.Orgs = orgs
+			user.Orgs = orgs // Already normalized to lowercase
 			user.IsActive = false
 			user.Status = "pending"
 			user.AuthProvider = configUser.AuthProvider
@@ -397,7 +415,7 @@ func ApplyRBAC(db database.DBConnection, config *PeriobolosConfig, emailConfig *
 			if existingUser.Email != configUser.Email || existingUser.Role != role || !stringSlicesEqual(existingUser.Orgs, orgs) {
 				existingUser.Email = configUser.Email
 				existingUser.Role = role
-				existingUser.Orgs = orgs
+				existingUser.Orgs = orgs // Already normalized to lowercase
 				needsUpdate = true
 			}
 
@@ -438,9 +456,11 @@ func stringSlicesEqual(a, b []string) bool {
 }
 
 func getOrgByName(ctx context.Context, db database.DBConnection, name string) (*model.Org, error) {
+	// Normalize the search name to lowercase
+	normalizedName := strings.ToLower(strings.TrimSpace(name))
 	query := `FOR org IN orgs FILTER org.name == @name RETURN org`
 	cursor, err := db.Database.Query(ctx, query, &arangodb.QueryOptions{
-		BindVars: map[string]interface{}{"name": name},
+		BindVars: map[string]interface{}{"name": normalizedName},
 	})
 	if err != nil {
 		return nil, err
