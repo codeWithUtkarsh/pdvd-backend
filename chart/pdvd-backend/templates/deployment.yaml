@@ -86,6 +86,38 @@ spec:
                 secretKeyRef:
                   name: github-creds
                   key: PrivateKey
+            {{- if .Values.smtp.enabled }}
+            - name: SMTP_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-config
+                  key: SMTPHost
+            - name: SMTP_PORT
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-config
+                  key: SMTPPort
+            - name: SMTP_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-config
+                  key: SMTPUsername
+            - name: SMTP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-config
+                  key: SMTPPassword
+            - name: SMTP_FROM_EMAIL
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-config
+                  key: SMTPFromEmail
+            - name: SMTP_FROM_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: smtp-config
+                  key: SMTPFromName
+            {{- end }}
           ports:
             - name: http
               containerPort: 8080
