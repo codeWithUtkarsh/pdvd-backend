@@ -1,1146 +1,1520 @@
-# Post-Deployment Vulnerability Remediation Architecture Documentation
+# PDVD System Design Document
+
+**Version:** 2.0  
+**Last Updated:** January 2026  
+**Status:** Production
+
+## Table of Contents
+
+1. [Executive Summary](#executive-summary)
+2. [System Architecture](#system-architecture)
+3. [Multi-Tenant RBAC System](#multi-tenant-rbac-system)
+4. [Authentication & Authorization](#authentication--authorization)
+5. [Database Schema](#database-schema)
+6. [API Specification](#api-specification)
+7. [CVE Lifecycle Management](#cve-lifecycle-management)
+8. [Hub-and-Spoke Graph Design](#hub-and-spoke-graph-design)
+9. [Deployment Architecture](#deployment-architecture)
+10. [Security Considerations](#security-considerations)
+
+---
 
 ## Executive Summary
 
-Post-Deployment Vulnerability Remediation answers critical questions for every high-risk OSS vulnerability: **"What's the threat? Where do I fix it? Where is it running? How do I fix it?"**
+PDVD is a graph-based vulnerability management platform that tracks CVEs from discovery through production deployment to remediation. The system uses a hub-and-spoke architecture with PURL (Package URL) nodes to achieve 99.89% edge reduction compared to traditional graph designs, enabling linear O(N+M) scalability.
 
-The system bridges four key domains:
+### Key Capabilities
 
-1. **Vulnerabilities (The Threat)** - CVE data from OSV.dev including affected packages, severity levels, version ranges, and fix information
-2. **Project Releases (Where to Fix It)** - Git repositories, SBOMs, dependencies, binary artifacts, and release metadata from GitHub/GitLab
-3. **Synced Endpoints (Where It's Running)** - Production deployments across cloud providers, Kubernetes clusters, serverless functions, edge devices, and mission assets
-4. **Mitigations (How to Fix It)** - Actionable remediation guidance including fixed versions, affected releases, deployment impact analysis, and automated issue creation
+- **Multi-Tenant RBAC:** Organization-based access control with 4-level role hierarchy
+- **GitOps Workflow:** YAML-driven configuration with automatic sync from Git repositories
+- **CVE Lifecycle Tracking:** Complete audit trail from introduction to remediation
+- **Real-Time Dashboard:** MTTR metrics, SLA compliance, and executive summaries
+- **Automated Workflows:** GitHub App integration, email invitations, Jira ticket creation
 
-### Value Proposition
+### Design Principles
 
-By connecting vulnerability data with project releases, deployment locations, and remediation paths, the system enables security teams to:
+1. **Graph-First:** Relationships are first-class citizens
+2. **Hub-and-Spoke:** Minimize edges through central hub nodes
+3. **Multi-Tenancy:** Org-scoped data with flexible global access
+4. **GitOps:** Infrastructure and RBAC as code
+5. **Zero-Trust:** JWT authentication with HttpOnly cookies
 
-- Immediately identify which production systems are affected by new CVEs
-- Trace vulnerable packages back to source code repositories
-- Determine exact versions that need updating
-- Locate deployment configurations for remediation
-- Prioritize fixes based on actual deployment exposure and severity
-- Generate automated remediation workflows (Jira, GitHub, GitLab issues, AI Auto-remediation)
-- Track mitigation progress across the entire software supply chain
+---
 
-### Integration Points
-
-**At Setup, Users Connect:**
-
-| Code Repository          | Binary Repository      | Deployment Infrastructure     | Issue Tracking      |
-|--------------------------|------------------------|-------------------------------|---------------------|
-| GitHub/GitLab repos      | Quay, DockerHub        | Kubernetes clusters           | Jira, GitHub Issues |
-| SBOMs & dependency files | ArtifactHub, Sonatype  | AWS/Azure/GCP endpoints       | GitLab Issues       |
-| Source code & commits    | JFrog, GitHub Packages | Edge devices, IoT, satellites | AI Auto-remediation |
-
-## Functional Requirements
-
-### Vulnerability Data Management
-
-The system automatically ingests vulnerability data from OSV.dev on a scheduled basis, supporting all major package ecosystems including npm, PyPI, Maven, Go, NuGet, and RubyGems. Vulnerability records are normalized into a consistent format, extracting Package URLs (PURLs) and deduplicating based on CVE identifiers and modification timestamps.
-
-**CVSS Score Calculation:** During ingestion, the system parses CVSS v3.0, v3.1, and v4.0 vector strings (e.g., `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H`) using the `github.com/pandatix/go-cvss` library to calculate accurate numeric base scores. These calculated scores are stored in the `database_specific` field alongside severity ratings (CRITICAL, HIGH, MEDIUM, LOW). CVEs without severity
-information are automatically assigned a LOW severity rating (score: 0.1) to ensure comprehensive tracking. This pre-calculation approach eliminates runtime parsing overhead and enables efficient severity-based queries.
-
-**Severity Rating Mappings:**
-
-- **CRITICAL**: CVSS score 9.0 - 10.0
-- **HIGH**: CVSS score 7.0 - 8.9
-- **MEDIUM**: CVSS score 4.0 - 6.9
-- **LOW**: CVSS score 0.1 - 3.9 (includes CVEs with missing or unparseable severity data)
-- **NONE**: CVSS score 0.0
-
-When configured, the system enriches vulnerability data with MITRE ATT&CK technique mappings to provide additional context about attack patterns. All vulnerability information includes severity scores (CVSS), severity ratings, affected version ranges, and available fix versions.
-
-### Release and SBOM Processing
-
-The system accepts Software Bill of Materials (SBOMs) in CycloneDX format through both REST API and CLI interfaces. Each SBOM undergoes validation to ensure structural correctness before processing. The system extracts component information including package names, versions, and PURLs from the SBOM content. Comprehensive git metadata is automatically collected from repositories, including commit
-hashes, branch information, author details, and timestamps. Releases are deduplicated using a composite key of name, version, and content SHA, while SBOMs are deduplicated using SHA256 content hashing to prevent redundant storage. The system supports multiple project types (applications, libraries, Docker containers) and maintains relationships between releases and their corresponding SBOMs.
-
-### Sync and Endpoint Management
-
-The system tracks deployment of releases to endpoints, creating a complete picture of where software is running in production. Endpoints represent deployment targets such as Kubernetes clusters, cloud instances (EC2, Lambda, ECS), edge devices, IoT systems, and mission assets. Each endpoint is classified by type and environment (production, staging, development). Sync records associate specific
-release versions with endpoints, recording when each deployment occurred. This enables the system to answer "where is this vulnerability running" by traversing from CVEs through releases to their deployed endpoints. The unique composite index on sync records prevents duplicate deployments while supporting multiple syncs of the same release to different endpoints.
-
-### Vulnerability Analysis
-
-The system performs sophisticated vulnerability matching by connecting CVEs to affected releases through PURL-based graph relationships. Version matching follows OSV specifications, supporting both semantic versioning (SEMVER) and ecosystem-specific version schemes. The matching logic accurately identifies all releases affected by a given CVE and all CVEs affecting a given release.
-Version-specific matching is achieved through metadata stored on graph edges, allowing precise filtering that eliminates false positives. The system handles complex version range specifications including minimum versions, maximum versions, and specific version exclusions.
-
-**Severity-Based Filtering:** Queries can filter vulnerabilities by severity rating (CRITICAL, HIGH, MEDIUM, LOW) using pre-calculated values stored during ingestion. The system performs efficient string-based filtering on severity ratings rather than complex numeric range calculations, significantly improving query performance. All severity-based queries traverse from CVEs through PURLs to
-releases and their deployed endpoints, providing complete impact analysis at any severity threshold.
-
-### Query and Reporting
-
-Users can query the system through GraphQL API endpoints to retrieve vulnerability information, release details, and deployment status. The system provides comprehensive listing of all releases with basic metadata, detailed retrieval of specific releases including full SBOMs, vulnerability reports for individual releases showing all affecting CVEs, and impact analysis for CVEs showing all
-affected releases and endpoints. Severity-based queries return all releases or endpoints affected by vulnerabilities at a specified severity level (CRITICAL, HIGH, MEDIUM, or LOW). All responses include actionable information such as severity levels, severity ratings, numeric CVSS scores, fix versions, affected packages, endpoint locations, and source repository information. The CLI supports
-exporting SBOMs to files for offline analysis and integration with other tools.
-
-### Mitigation Capabilities
-
-The system provides a comprehensive mitigation view that aggregates vulnerability data across releases and endpoints, showing:
-
-- CVE identification and severity classification
-- Affected package versions and fixed-in versions
-- Count of affected releases and deployed endpoints
-- Ability to select multiple vulnerabilities for bulk action
-- Integration with issue tracking systems (Jira, GitHub Issues, GitLab Issues)
-- AI-powered auto-remediation workflows
-
-This enables security teams to:
-
-- Prioritize remediation based on deployment exposure
-- Create tracking tickets in their preferred issue management system
-- Coordinate fixes across multiple affected releases
-- Track remediation progress to completion
-
-### Integration Capabilities
-
-The system integrates with GitHub and GitLab repositories to collect source code metadata, build information, and commit histories. Support for multiple binary repositories (Quay, DockerHub, ArtifactHub, Sonatype, JFrog) enables tracking of artifacts through the software supply chain. Deployment tracking through sync records allows the system to understand where
-vulnerable code is actually running. Metadata collection works seamlessly in CI/CD environments including GitHub Actions and Jenkins, automatically gathering build numbers, URLs, and timestamps.
-
-## Non-Functional Requirements
-
-### Performance and Scalability
-
-The system is designed to handle large-scale vulnerability management workloads with optimal end-user experience. All API endpoints maintain an end-user response time of less than 3 seconds under normal load conditions, including:
-
-- Release upload with SBOM processing
-- Vulnerability query for releases with up to 500 components
-- Severity-based filtering across large datasets (affected-releases, affected-endpoints)
-- Release-to-endpoint impact analysis with graph traversal
-- List operations for releases, endpoints, and syncs
-
-Individual CVE records are processed and stored during ingestion with CVSS score calculation adding negligible overhead (<1ms per CVE). The ingestion pipeline can process over 50,000 CVE records per hour. The API service handles concurrent requests from 100+ clients without degradation. Database indexes optimize query performance for common access patterns, including a persistent index on
-`database_specific.severity_rating` for fast severity-based filtering. Connection pooling ensures efficient resource utilization.
-
-The system scales to support over one million releases, 500,000 unique SBOMs, 100,000 CVE records, and unlimited endpoint/sync records while maintaining responsive query performance. Severity-based queries use optimized single-pass traversal with string-based filtering to avoid loading large result sets into memory.
-
-**Deployment Strategy:** Rolling updates are used for all system deployments to ensure zero-downtime operation and eliminate the need for maintenance windows. The rolling update strategy progressively replaces instances of the previous version with the new version, maintaining service availability throughout the deployment process.
-
-### Reliability and Availability
-
-The API service maintains 99.9% uptime during business hours through robust error handling and recovery mechanisms. Database connections implement exponential backoff retry logic to handle transient failures gracefully. The system recovers from network interruptions without data loss and uses panic recovery middleware to prevent service crashes from unexpected errors. All input data undergoes
-validation before processing to ensure data quality. The CVE ingestion job retries failed downloads up to three times before logging errors for manual intervention. CVSS parsing errors are logged but do not prevent CVE ingestion—CVEs with unparseable CVSS vectors are assigned default LOW severity to ensure comprehensive coverage.
-
-### Security
-
-Security is embedded throughout the system architecture. All external communications use TLS 1.2 or higher for encryption. The system verifies GPG signatures on git commits when available to ensure code authenticity. ZipSlip protection prevents directory traversal attacks during archive extraction. All user inputs are sanitized to prevent injection attacks. Database connections require
-authentication, and sensitive credentials are never exposed in logs or error messages. CORS policies control API access, and SBOM content undergoes validation to prevent malicious data injection.
-
-### Maintainability and Observability
-
-The system uses structured logging with Zap to provide consistent, searchable log output across all components. Health check endpoints enable monitoring systems to verify service status. All CVE ingestion operations and API requests are logged with timestamps and response times for operational insight. CVSS calculation success and failures are logged with relevant vector strings for
-troubleshooting. The codebase maintains modular package architecture with clear separation of concerns, making it easy to understand and modify. API endpoints are fully documented with examples, and the CLI provides helpful error messages with suggested remediation steps. Database schema changes follow backwards compatibility principles to enable zero-downtime deployments.
-
-### Portability and Interoperability
-
-The system runs on Linux, macOS, and Windows, deployable via Docker containers and Kubernetes with Helm charts. All configuration uses environment variables, avoiding platform-specific dependencies. The implementation complies with industry standards including the CycloneDX SBOM specification, Package URL (PURL) specification, OSV vulnerability data format, and CVSS v3.0/v3.1/v4.0 specifications.
-REST API follows standard HTTP conventions for methods and status codes, with JSON as the primary data exchange format. Semantic versioning specification governs all version comparisons, ensuring consistent behavior across different package ecosystems.
-
-## Overview
-
-Post-Deployment Vulnerability Remediation is a comprehensive vulnerability management system built in Go that tracks relationships between software releases, their Software Bill of Materials (SBOMs), known CVEs, deployment endpoints, and remediation actions. The system uses a graph database (ArangoDB) to create a hub-and-spoke architecture that enables efficient vulnerability analysis across software components and
-identifies where vulnerable code is running in production with actionable remediation paths.
-
-## Data Flow: Answering the Four Key Questions
-
-### Question 1: "What's the threat?" (Vulnerabilities)
-
-**Data Sources:**
-
-- **OSV.dev API**: CVE records with CVSS vectors, affected packages, version ranges
-- **MITRE ATT&CK**: Technique mappings (optional)
-- **CVSS Parser**: Real-time score calculation and severity rating assignment
-
-**Flow:**
+## System Architecture
 
 ```mermaid
-flowchart LR
-    A[OSV.dev CVE Feed] --> B[Parse CVSS Vector]
-    B --> C[Calculate Base Score]
-    C --> D[Assign Severity Rating<br/>CRITICAL/HIGH/MEDIUM/LOW]
-    D --> E[Store in CVE Collection<br/>with database_specific]
-    E --> F[Create CVE2PURL edges]
+graph TB
+    subgraph External["External Services"]
+        OSV[OSV.dev API<br/>CVE Database]
+        GitHub[GitHub App<br/>Repo Access]
+        SMTP[SMTP Server<br/>Email Invitations]
+        GitRepo[Git Repository<br/>rbac.yaml]
+    end
     
-    style A fill:#ff6b6b
-    style D fill:#ffd43b
-    style F fill:#4dabf7
+    subgraph API["API Layer (Go/Fiber)"]
+        REST[REST API<br/>/api/v1/*]
+        GraphQL[GraphQL API<br/>/api/v1/graphql]
+        Auth[Auth Middleware<br/>JWT Validation]
+        RBAC[RBAC Middleware<br/>Org Filtering]
+    end
+    
+    subgraph Services["Business Logic"]
+        CVESvc[CVE Service<br/>Ingestion & Matching]
+        RBACsvc[RBAC Service<br/>User/Org Management]
+        LifeSvc[Lifecycle Service<br/>MTTR Tracking]
+        SyncSvc[Sync Service<br/>Deployment History]
+    end
+    
+    subgraph Data["Data Layer"]
+        Arango[(ArangoDB<br/>Graph + Document)]
+    end
+    
+    OSV -->|Pull CVEs| CVESvc
+    GitHub -->|OAuth + Tokens| RBACsvc
+    SMTP -->|Send Invites| RBACsvc
+    GitRepo -->|Webhook| RBACsvc
+    
+    REST --> Auth
+    GraphQL --> Auth
+    Auth --> RBAC
+    RBAC --> Services
+    Services --> Arango
+    
+    style API fill:#e3f2fd
+    style Services fill:#f3e5f5
+    style Data fill:#fff3e0
 ```
 
-**Result:** Security teams can filter and prioritize vulnerabilities by severity, understand attack patterns, and identify affected packages with precise CVSS scoring.
+### Technology Stack
 
-### Question 2: "Where do I fix it?" (Project Releases)
+| Layer | Technology | Purpose |
+|-------|------------|---------|
+| **API Framework** | Fiber v2 | High-performance HTTP server |
+| **GraphQL** | graphql-go | Query flexibility |
+| **Database** | ArangoDB 3.11+ | Graph + document store |
+| **Auth** | golang-jwt/jwt | JWT generation/validation |
+| **Password** | bcrypt | Password hashing |
+| **CVE Data** | OSV.dev API | Vulnerability database |
+| **CVSS** | pandatix/go-cvss | Score calculation |
+| **Git** | go-git | GitOps integration |
+| **Email** | net/smtp | SMTP invitations |
 
-**Data Sources:**
+---
 
-- **GitHub/GitLab**: Git commits, branches, tags, metadata
-- **CI/CD Systems**: Build information, timestamps, URLs
-- **SBOM Files**: CycloneDX component inventory
-- **OpenSSF Scorecard**: Security posture scores
+## Multi-Tenant RBAC System
 
-**Flow:**
+### Overview
+
+PDVD implements organization-based multi-tenancy with a Peribolos-style YAML configuration stored in Git. Users belong to one or more organizations, and data access is scoped by org membership.
 
 ```mermaid
-flowchart LR
-    A[Release Upload<br/>with SBOM] --> B[Extract Git Metadata]
-    B --> C[Parse SBOM Components]
-    C --> D[Create PURL Hubs<br/>version-free]
-    D --> E[Create Release2SBOM edges]
-    E --> F[Create SBOM2PURL edges<br/>with version metadata]
-    F --> G[Link to CVE2PURL edges]
+graph TB
+    subgraph Users["Users"]
+        Alice[alice<br/>owner@acme-corp]
+        Bob[bob<br/>editor@acme-corp]
+        Charlie[charlie<br/>admin@globex]
+        Admin[admin<br/>no orgs = global]
+    end
     
-    style A fill:#fff0e0
-    style C fill:#69db7c
-    style D fill:#4dabf7
-    style G fill:#ff6b6b
+    subgraph Orgs["Organizations"]
+        Acme[acme-corp<br/>ACME Corporation]
+        Globex[globex<br/>Globex Industries]
+    end
+    
+    subgraph Resources["Resources"]
+        R1[payment-service<br/>org: acme-corp]
+        R2[frontend-app<br/>org: acme-corp]
+        R3[api-gateway<br/>org: globex]
+        R4[open-source-lib<br/>is_public: true]
+    end
+    
+    Alice --> Acme
+    Bob --> Acme
+    Charlie --> Globex
+    
+    Acme --> R1
+    Acme --> R2
+    Globex --> R3
+    
+    Admin -.->|sees all| R1
+    Admin -.->|sees all| R2
+    Admin -.->|sees all| R3
+    Admin -.->|sees all| R4
+    
+    style Alice fill:#c8e6c9
+    style Admin fill:#ffccbc
+    style R4 fill:#fff9c4
 ```
 
-**Result:** Development teams know which source code repositories, branches, and commits contain vulnerable dependencies, with OpenSSF security scores to prioritize remediation efforts.
-
-### Question 3: "Where is it running?" (Synced Endpoints)
-
-**Data Sources:**
-
-- **Sync API**: Deployment associations (release → endpoint)
-- **Endpoint Registry**: Kubernetes clusters, cloud instances, edge devices, mission assets
-- **Environment Tags**: Production, staging, development classifications
-
-**Flow:**
+### Role Hierarchy
 
 ```mermaid
-flowchart LR
-    A[Sync Record Created] --> B[Link Release to Endpoint]
-    B --> C[Track Deployment Time]
-    C --> D[Classify by Environment<br/>prod/staging/dev]
-    D --> E[Aggregate Vulnerabilities<br/>by Endpoint]
-    E --> F[Calculate Exposure<br/>by Severity]
+graph TD
+    Owner[owner<br/>Full Access + Billing] --> Admin[admin<br/>Full Access + User Mgmt]
+    Admin --> Editor[editor<br/>Read + Write]
+    Editor --> Viewer[viewer<br/>Read Only]
     
-    style A fill:#cc5de8
-    style E fill:#ff6b6b
-    style F fill:#ffd43b
+    Owner -.->|Can perform| OA[Create/Delete Orgs<br/>Manage Billing<br/>Assign Roles]
+    Admin -.->|Can perform| AA[Invite Users<br/>Manage Users<br/>Access All Resources]
+    Editor -.->|Can perform| EA[Create Releases<br/>Upload SBOMs<br/>Sync Endpoints]
+    Viewer -.->|Can perform| VA[View Dashboards<br/>Query CVEs<br/>Export Reports]
+    
+    style Owner fill:#ff6b6b
+    style Admin fill:#ffa94d
+    style Editor fill:#51cf66
+    style Viewer fill:#4dabf7
 ```
 
-**Result:** Operations teams know exactly which production systems, environments, and mission-critical assets are running vulnerable code, with vulnerability counts by severity level.
+### RBAC Configuration Format
 
-### Question 4: "How do I fix it?" (Mitigations)
+```yaml
+# rbac.yaml (Peribolos-style)
+orgs:
+  - name: acme-corp
+    display_name: ACME Corporation
+    description: Main engineering organization
+    metadata:
+      cost_center: CC-1234
+      billing_contact: finance@acme.com
+    members:
+      - username: alice
+        role: owner
+      - username: bob
+        role: editor
+      - username: charlie
+        role: viewer
 
-**Data Sources:**
+  - name: globex
+    display_name: Globex Industries
+    members:
+      - username: charlie
+        role: admin
 
-- **Fix Information**: OSV.dev fixed-in versions
-- **Release Aggregation**: Count of affected releases per CVE
-- **Endpoint Aggregation**: Count of affected endpoints per CVE
-- **Issue Tracking**: Jira, GitHub, GitLab integration APIs
+users:
+  - username: alice
+    email: alice@acme.com
+    first_name: Alice
+    last_name: Smith
+    auth_provider: local
+    github_username: alice-gh
+    
+  - username: bob
+    email: bob@acme.com
+    first_name: Bob
+    last_name: Jones
+    auth_provider: github
+    github_username: bob-jones
 
-**Flow:**
+  - username: admin
+    email: admin@pdvd.com
+    first_name: System
+    last_name: Administrator
+    auth_provider: local
+    # No orgs = global access
+```
+
+### GitOps Workflow
 
 ```mermaid
-flowchart LR
-    A[Mitigation View Query] --> B[Aggregate by CVE+Package]
-    B --> C[Count Affected Releases]
-    C --> D[Count Affected Endpoints]
-    D --> E[Extract Fixed-In Versions]
-    E --> F[Present with Actions<br/>Jira/GitHub/GitLab/AI]
-    F --> G[Track Remediation Progress]
+sequenceDiagram
+    participant Dev as Developer
+    participant Git as GitHub Repo
+    participant Webhook as GitHub Webhook
+    participant API as PDVD API
+    participant DB as ArangoDB
     
-    style A fill:#e3f2fd
-    style C fill:#fff0e0
-    style D fill:#cc5de8
-    style E fill:#51cf66
-    style F fill:#4dabf7
+    Dev->>Git: Push rbac.yaml change
+    Git->>Webhook: Trigger webhook
+    Webhook->>API: POST /api/v1/rbac/sync
+    
+    API->>Git: Clone/pull repository
+    API->>API: Parse rbac.yaml
+    
+    rect rgb(200, 240, 200)
+        Note over API,DB: Sync Organizations
+        API->>DB: Create/update orgs
+    end
+    
+    rect rgb(240, 200, 200)
+        Note over API,DB: Sync Users
+        API->>DB: Create/update users
+        API->>DB: Update org memberships
+    end
+    
+    rect rgb(200, 200, 240)
+        Note over API,DB: Audit Changes
+        API->>DB: Log sync event
+        API->>DB: Record diffs
+    end
+    
+    API->>Webhook: 200 OK (sync complete)
+    Webhook->>Git: Update commit status
 ```
 
-**Result:** Security and development teams have actionable remediation plans with:
+### Data Scoping Rules
 
-- Specific fixed versions to upgrade to
-- Full scope of impact (releases + endpoints)
-- Automated issue creation in their workflow tools
-- Tracking mechanisms to monitor fix deployment
+1. **Org-Scoped Resources:**
+   - Releases with `org` field
+   - Endpoints with `org` field
+   - SBOMs (inherited from release)
+   - Sync records (inherited from endpoint)
 
-## Database Structure
+2. **Global Resources:**
+   - CVEs (shared across all orgs)
+   - PURL hubs (shared package index)
+   - Users with `orgs: []` (admin-level access)
+   - Resources with `is_public: true`
 
-The system uses ArangoDB, a multi-model database that supports both document storage and graph relationships. The database schema implements a hub-and-spoke architecture using PURL nodes as central hubs to connect CVEs with releases through their SBOMs, and extends to track which releases are synced to which endpoints.
+3. **Filtering Logic:**
+   ```go
+   // Pseudo-code for org filtering
+   func filterByOrg(user User, resources []Resource) []Resource {
+       if len(user.Orgs) == 0 {
+           return resources // Global access
+       }
+       
+       filtered := []Resource{}
+       for _, r := range resources {
+           if r.IsPublic || contains(user.Orgs, r.Org) {
+               filtered = append(filtered, r)
+           }
+       }
+       return filtered
+   }
+   ```
+
+---
+
+## Authentication & Authorization
+
+### Sign-Up Flow
 
 ```mermaid
-erDiagram
-    RELEASE ||--o{ RELEASE2SBOM : "has"
-    SBOM ||--o{ RELEASE2SBOM : "belongs_to"
-    SBOM ||--o{ SBOM2PURL : "contains"
-    PURL ||--o{ SBOM2PURL : "referenced_by"
-    CVE ||--o{ CVE2PURL : "affects"
-    PURL ||--o{ CVE2PURL : "vulnerable_in"
-    RELEASE ||--o{ SYNC : "synced_to"
-    ENDPOINT ||--o{ SYNC : "hosts"
-
-    RELEASE {
-        string _key PK
-        string name "Release name"
-        string version "Release version"
-        string contentsha UK "Git commit SHA"
-        string giturl "Git repository URL"
-        string gitbranch "Git branch"
-        string gitcommit "Git commit hash"
-        string gitauthor "Commit author"
-        string gitemail "Author email"
-        datetime gitdate "Commit timestamp"
-        string gitmessage "Commit message"
-        string projecttype "application, library, container"
-        string quayrepo "Quay registry/repo"
-        string quaysha "Quay image SHA"
-        string quaytag "Quay image tag"
-        string dockerrepo "Docker registry/repo"
-        string dockersha "Docker image SHA"
-        string dockertag "Docker image tag"
-        datetime builddate "Build timestamp"
-        string buildid "CI/CD build ID"
-        string buildurl "CI/CD build URL"
-        string objtype "ProjectRelease"
-    }
-
-    SBOM {
-        string _key PK
-        string contentsha "SHA256 hash of content"
-        json content "CycloneDX SBOM JSON"
-        string objtype "SBOM"
-    }
-
-    PURL {
-        string _key PK
-        string purl UK "Base PURL without version"
-        string objtype "PURL"
-    }
-
-    CVE {
-        string _key PK
-        string id "CVE identifier"
-        json osv "Full OSV vulnerability data"
-        string summary "Vulnerability summary"
-        string details "Detailed description"
-        array severity "CVSS vector strings"
-        array affected "Affected packages and ranges"
-        datetime published "Publication date"
-        datetime modified "Last modification date"
-        array aliases "Alternative identifiers"
-        json techniques "MITRE ATT&CK techniques"
-        json database_specific "Calculated CVSS scores and ratings"
-        string objtype "CVE"
-    }
-
-    ENDPOINT {
-        string _key PK
-        string name UK "Endpoint identifier"
-        string endpoint_type "cluster, ec2, lambda, ecs, edge, iot, mission_asset"
-        string environment "production, staging, development"
-        string objtype "Endpoint"
-    }
-
-    SYNC {
-        string _key PK
-        string release_name "Reference to release name"
-        string release_version "Reference to release version"
-        string endpoint_name "Reference to endpoint name"
-        datetime synced_at "Timestamp of sync"
-        string objtype "Sync"
-    }
-
-    RELEASE2SBOM {
-        string _from FK "release/_key"
-        string _to FK "sbom/_key"
-    }
-
-    SBOM2PURL {
-        string _from FK "sbom/_key"
-        string _to FK "purl/_key"
-        string version "Specific package version"
-        string full_purl "Complete PURL with version"
-    }
-
-    CVE2PURL {
-        string _from FK "cve/_key"
-        string _to FK "purl/_key"
-    }
+sequenceDiagram
+    participant User
+    participant API
+    participant DB
+    participant Git
+    participant Email
+    
+    User->>API: POST /api/v1/signup<br/>{username, email, org, ...}
+    
+    rect rgb(240, 240, 255)
+        Note over API,DB: Create User (Pending)
+        API->>DB: INSERT users<br/>{is_active: false, status: 'pending'}
+        API->>DB: INSERT/UPDATE orgs<br/>if org doesn't exist
+    end
+    
+    rect rgb(255, 240, 240)
+        Note over API,Git: Update GitOps Config
+        API->>Git: Clone rbac.yaml
+        API->>Git: Add user to yaml
+        API->>Git: Commit + push
+    end
+    
+    rect rgb(240, 255, 240)
+        Note over API,Email: Send Invitation
+        API->>DB: INSERT invitations<br/>{token, expires_at}
+        API->>Email: Send invite email<br/>with token link
+    end
+    
+    API->>User: 201 Created<br/>{message: "Check email"}
+    
+    User->>API: GET /invitation/:token
+    API->>User: Return invitation form
+    
+    User->>API: POST /invitation/:token/accept<br/>{password}
+    
+    rect rgb(240, 255, 255)
+        Note over API,DB: Activate User
+        API->>DB: UPDATE users<br/>{is_active: true, password_hash}
+        API->>DB: UPDATE invitations<br/>{accepted_at: now()}
+    end
+    
+    API->>API: Generate JWT
+    API->>User: Set-Cookie: auth_token=<jwt><br/>Auto-login
 ```
 
-## Hub-and-Spoke Architecture: Visual Guide
-
-This section provides visual representations of the hub-and-spoke architecture to make it easier to understand how vulnerabilities, packages, and releases are connected. See [Hub and Spoke Guide](hub_and_spoke_guide.md) for detailed explanation and examples.
-
-### Architecture Overview Diagram
+### Login Flow
 
 ```mermaid
-flowchart TB
-    subgraph VulnDomain["VULNERABILITY DOMAIN (Spokes)"]
-        CVEDocs["CVE DOCUMENTS<br/>CVE-2024-1234 (lodash)<br/>CVE-2024-5678 (express)<br/>CVE-2024-9999 (axios)"]
+sequenceDiagram
+    participant User
+    participant API
+    participant DB
+    participant GitHub
+    
+    alt Local Authentication
+        User->>API: POST /api/v1/auth/login<br/>{username, password}
+        API->>DB: SELECT users WHERE username
+        API->>API: bcrypt.Compare(password, hash)
+        alt Valid
+            API->>API: Generate JWT
+            API->>User: Set-Cookie: auth_token=<jwt><br/>HttpOnly, SameSite=Lax
+        else Invalid
+            API->>User: 401 Unauthorized
+        end
     end
     
-    subgraph PURLHub["PURL HUB LAYER (Central Hub Nodes)"]
-        PURLNodes["pkg:npm/lodash<br/>pkg:npm/express<br/>pkg:npm/axios<br/>pkg:pypi/django<br/>pkg:maven/log4j"]
+    alt GitHub OAuth
+        User->>API: GET /api/v1/auth/github
+        API->>GitHub: Redirect to OAuth
+        GitHub->>User: Authorize app
+        GitHub->>API: Callback with code
+        API->>GitHub: Exchange code for token
+        API->>DB: SELECT/INSERT user<br/>WHERE github_username
+        API->>API: Generate JWT
+        API->>User: Set-Cookie: auth_token=<jwt>
     end
-    
-    subgraph SBOMDomain["SBOM DOCUMENTS"]
-        SBOMDocs["SBOM-A (500 components)<br/>SBOM-B (350 components)<br/>SBOM-C (420 components)"]
-    end
-    
-    subgraph ReleaseDomain["PROJECT RELEASES (Spokes)"]
-        Releases["frontend-app v1.0<br/>api-service v2.1<br/>worker-service v3.0"]
-    end
-    
-    subgraph EndpointDomain["DEPLOYMENT ENDPOINTS (Spokes)"]
-        Endpoints["prod-k8s-us-east (cluster)<br/>prod-lambda-us-west<br/>edge-device-001"]
-    end
-    
-    CVEDocs -->|CVE2PURL Edges| PURLHub
-    PURLHub -->|SBOM2PURL Edges<br/>with version metadata| SBOMDomain
-    SBOMDomain -->|RELEASE2SBOM Edges| ReleaseDomain
-    ReleaseDomain -->|SYNC Records| EndpointDomain
-    
-    style VulnDomain fill:#ffe0e0
-    style PURLHub fill:#e0f0ff
-    style SBOMDomain fill:#e0ffe0
-    style ReleaseDomain fill:#fff0e0
-    style EndpointDomain fill:#f0e0ff
 ```
 
-### Detailed Hub Example: Single Package
-
-This diagram shows how multiple CVEs and multiple SBOMs connect through a single PURL hub:
-
-```mermaid
-flowchart TB
-    subgraph CVELayer["CVE LAYER - Vulnerabilities"]
-        CVE1["CVE-2024-1234<br/>'Prototype Pollution'<br/>affects: 4.17.0-4.17.20"]
-        CVE2["CVE-2024-5678<br/>'ReDoS Attack'<br/>affects: 4.0.0-4.17.19"]
-    end
-    
-    subgraph Hub["PURL HUB"]
-        PURL["pkg:npm/lodash<br/>(version-free)<br/>Single hub node for<br/>ALL lodash references"]
-    end
-    
-    subgraph SBOMLayer["SBOM LAYER - Releases"]
-        SBOM1["SBOM-001<br/>├─ lodash: 4.17.20<br/>├─ express: 4.18.0<br/>└─ axios: 1.3.0"]
-        SBOM2["SBOM-002<br/>├─ lodash: 4.17.19<br/>├─ react: 18.0.0<br/>└─ redux: 4.2.0"]
-    end
-    
-    subgraph ReleaseLayer["RELEASES"]
-        REL1["frontend-app v1.0"]
-        REL2["api-service v2.1"]
-    end
-    
-    subgraph EndpointLayer["ENDPOINTS"]
-        EP1["prod-k8s-us-east"]
-        EP2["prod-lambda"]
-    end
-    
-    subgraph Matching["VULNERABILITY MATCHING LOGIC"]
-        Match1["CVE-2024-1234 affects 4.17.0-4.17.20<br/>✓ Matches SBOM-001 (version 4.17.20)<br/>✗ Skips SBOM-002 (version 4.17.19)"]
-        Match2["CVE-2024-5678 affects 4.0.0-4.17.19<br/>✗ Skips SBOM-001 (version 4.17.20)<br/>✓ Matches SBOM-002 (version 4.17.19)"]
-    end
-    
-    CVE1 & CVE2 -->|CVE2PURL| PURL
-    PURL -->|SBOM2PURL<br/>version: 4.17.20<br/>on edge metadata| SBOM1
-    PURL -->|SBOM2PURL<br/>version: 4.17.19<br/>on edge metadata| SBOM2
-    SBOM1 -->|RELEASE2SBOM| REL1
-    SBOM2 -->|RELEASE2SBOM| REL2
-    REL1 -->|SYNC| EP1
-    REL2 -->|SYNC| EP2
-    
-    style CVE1 fill:#ff6b6b
-    style CVE2 fill:#ff6b6b
-    style PURL fill:#4dabf7
-    style SBOM1 fill:#69db7c
-    style SBOM2 fill:#69db7c
-    style Matching fill:#fff3bf
-```
-
-### Query Flow Visualization
-
-This shows how a query traverses the graph from CVE to deployed endpoint:
-
-```mermaid
-flowchart TB
-    Start["<b>QUERY:</b> Which production endpoints<br/>are running CVE-2024-1234?"] --> Step1
-    
-    Step1["<b>STEP 1:</b> Start at CVE Document"] --> CVE
-    CVE["CVE-2024-1234<br/>├─ id: CVE-2024-1234<br/>├─ summary: Prototype Pollution<br/>├─ severity_rating: CRITICAL<br/>└─ affected:<br/>    └─ package: pkg:npm/lodash<br/>       versions: 4.17.0-4.17.20"]
-    
-    CVE -->|CVE2PURL Edge| Step2["<b>STEP 2:</b> Traverse to PURL Hub"]
-    Step2 --> PURL["PURL Hub: pkg:npm/lodash<br/>(Unique hub for all lodash refs)"]
-    
-    PURL -->|SBOM2PURL Edges<br/>with version metadata| Step3["<b>STEP 3:</b> Find Connected SBOMs"]
-    
-    Step3 --> SBOMs
-    subgraph SBOMs["SBOMs Found"]
-        SBOM_A["SBOM-A<br/>v4.17.20"]
-        SBOM_B["SBOM-B<br/>v4.17.19"]
-        SBOM_C["SBOM-C<br/>v4.17.21"]
-    end
-    
-    SBOMs --> Step4["<b>STEP 4:</b> Filter by Version Range<br/>(in Go code)"]
-    
-    Step4 --> Filters
-    subgraph Filters["Version Filtering"]
-        Filter_A["✓ MATCHES<br/>(4.17.20)"]
-        Filter_B["✗ TOO OLD<br/>(4.17.19)"]
-        Filter_C["✗ TOO NEW<br/>(4.17.21)"]
-    end
-    
-    Filter_A -->|RELEASE2SBOM Edge| Step5["<b>STEP 5:</b> Traverse to Releases"]
-    Step5 --> REL["Release<br/>frontend-app v1.0"]
-    
-    REL -->|SYNC Record| Step6["<b>STEP 6:</b> Find Deployment Endpoints"]
-    Step6 --> EP["Endpoint<br/>prod-k8s-us-east<br/>type: cluster<br/>env: production"]
-    
-    EP --> Result["<b>RESULT:</b><br/>frontend-app v1.0 on prod-k8s-us-east<br/>is VULNERABLE to CVE-2024-1234"]
-    
-    style Start fill:#e3f2fd
-    style CVE fill:#ff6b6b
-    style PURL fill:#4dabf7
-    style Filter_A fill:#51cf66
-    style Filter_B fill:#ffd43b
-    style Filter_C fill:#ffd43b
-    style EP fill:#cc5de8
-    style Result fill:#ff6b6b
-```
-
-### Key Design Features
-
-#### Hub-and-Spoke Architecture (Detailed)
-
-The system implements a **hub-and-spoke architecture** using PURL (Package URL) nodes as central hubs to efficiently connect vulnerability data with software releases through their SBOMs. This architectural pattern is commonly used in graph databases to optimize queries and reduce data duplication.
-
-**Core Concept:**
-
-Instead of creating direct connections between every CVE and every SBOM component (which would result in exponential edge growth), we use PURL nodes as intermediary hubs. Think of it like an airport hub system: rather than having direct flights between every pair of cities, major airlines route through hub airports, significantly reducing the number of routes needed.
-
-**Version Storage Strategy**: While PURL nodes store base package identifiers without versions (e.g., `pkg:npm/lodash`), the SBOM2PURL edges store specific version information (e.g., `4.17.20`). This enables accurate vulnerability matching where CVEs specify affected version ranges.
-
-**Content-Based Deduplication**: Releases use composite natural keys (name + version + contentsha) to handle rebuild scenarios, while SBOMs use SHA256 content hashing to enable sharing across multiple releases with identical dependencies.
-
-**CVSS Pre-Calculation**: CVE documents include a `database_specific` field containing pre-calculated CVSS scores and severity ratings. This field structure is:
+### JWT Structure
 
 ```json
 {
-  "cvss_base_score": 9.8,
-  "cvss_base_scores": [9.8],
-  "severity_rating": "CRITICAL"
+  "sub": "alice",
+  "email": "alice@acme.com",
+  "orgs": ["acme-corp"],
+  "role": "owner",
+  "iat": 1704067200,
+  "exp": 1704153600
 }
 ```
 
-This design enables fast severity-based queries using indexed string comparisons instead of runtime parsing and numeric calculations.
+**Cookie Settings:**
+```
+Set-Cookie: auth_token=<jwt>; 
+  HttpOnly; 
+  Secure; 
+  SameSite=Lax; 
+  Path=/; 
+  Max-Age=86400
+```
 
-**Sync Tracking**: Sync records create the critical link between releases and endpoints, enabling queries that answer "where is this vulnerability running in production?" Each sync records when a specific release version was deployed to a specific endpoint.
+### Middleware Chain
 
-**Composite Indexes**: Multi-field indexes on `release.name + release.version`, `sbom2purl._to + sbom2purl.version`, `sync.release_name + sync.release_version + sync.endpoint_name`, and `cve.database_specific.severity_rating` optimize common query patterns.
+```mermaid
+graph LR
+    Request[HTTP Request] --> AuthM[Auth Middleware<br/>Validate JWT]
+    AuthM -->|Valid| RBACM[RBAC Middleware<br/>Check Org Access]
+    AuthM -->|Invalid| Err401[401 Unauthorized]
+    
+    RBACM -->|Allowed| Handler[Route Handler]
+    RBACM -->|Denied| Err403[403 Forbidden]
+    
+    Handler --> Response[HTTP Response]
+    
+    style AuthM fill:#e3f2fd
+    style RBACM fill:#f3e5f5
+    style Handler fill:#e8f5e9
+```
 
-**Bidirectional Traversal**: Edge collections are indexed on both `_from` and `_to` fields, enabling efficient graph traversal in both directions—from CVE to affected releases/endpoints and from releases/endpoints to applicable CVEs.
+### Permission Matrix
 
-### CVE Database Specific Field Structure
+| Resource | Owner | Admin | Editor | Viewer |
+|----------|-------|-------|--------|--------|
+| **Organizations** |
+| Create org | ✅ | ✅ | ❌ | ❌ |
+| Delete org | ✅ | ❌ | ❌ | ❌ |
+| Update org metadata | ✅ | ✅ | ❌ | ❌ |
+| **Users** |
+| Invite user | ✅ | ✅ | ❌ | ❌ |
+| Revoke user | ✅ | ✅ | ❌ | ❌ |
+| Assign roles | ✅ | ✅ | ❌ | ❌ |
+| **Releases** |
+| Upload release | ✅ | ✅ | ✅ | ❌ |
+| Delete release | ✅ | ✅ | ✅ | ❌ |
+| View releases | ✅ | ✅ | ✅ | ✅ |
+| **Endpoints** |
+| Create endpoint | ✅ | ✅ | ✅ | ❌ |
+| Sync deployment | ✅ | ✅ | ✅ | ❌ |
+| View endpoints | ✅ | ✅ | ✅ | ✅ |
+| **Dashboards** |
+| View org dashboard | ✅ | ✅ | ✅ | ✅ |
+| Export reports | ✅ | ✅ | ✅ | ✅ |
 
-The `database_specific` field in CVE documents stores calculated CVSS information:
+---
 
+## Database Schema
+
+### Collections
+
+```mermaid
+erDiagram
+    USERS ||--o{ INVITATIONS : "has"
+    USERS }o--o{ ORGS : "member_of"
+    ORGS ||--o{ RELEASES : "owns"
+    ORGS ||--o{ ENDPOINTS : "manages"
+    
+    RELEASES ||--|| SBOM : "described_by"
+    SBOM ||--o{ SBOM2PURL : "contains"
+    PURL }o--o{ SBOM2PURL : "used_in"
+    
+    CVE ||--o{ CVE2PURL : "affects"
+    PURL }o--o{ CVE2PURL : "vulnerable"
+    
+    RELEASES ||--o{ RELEASE2CVE : "has_vulnerability"
+    CVE }o--o{ RELEASE2CVE : "found_in"
+    
+    RELEASES ||--o{ SYNC : "deployed_as"
+    ENDPOINTS ||--o{ SYNC : "hosts"
+    
+    CVE ||--o{ CVE_LIFECYCLE : "tracked_by"
+    RELEASES }o--|| CVE_LIFECYCLE : "introduced_in"
+    ENDPOINTS }o--|| CVE_LIFECYCLE : "active_on"
+```
+
+### Core Collections
+
+#### users
+```json
+{
+  "_key": "alice",
+  "username": "alice",
+  "email": "alice@acme.com",
+  "password_hash": "$2a$10$...",
+  "first_name": "Alice",
+  "last_name": "Smith",
+  "orgs": ["acme-corp"],
+  "role": "owner",
+  "auth_provider": "local",
+  "github_username": "alice-gh",
+  "github_token": "gho_...",
+  "is_active": true,
+  "created_at": "2024-01-01T00:00:00Z",
+  "last_login": "2024-12-01T10:30:00Z"
+}
+```
+
+#### orgs
+```json
+{
+  "_key": "acme-corp",
+  "name": "acme-corp",
+  "display_name": "ACME Corporation",
+  "description": "Main engineering organization",
+  "metadata": {
+    "cost_center": "CC-1234",
+    "billing_contact": "finance@acme.com",
+    "created_by": "alice"
+  },
+  "created_at": "2024-01-01T00:00:00Z"
+}
+```
+
+#### invitations
+```json
+{
+  "_key": "tok_abc123",
+  "token": "tok_abc123",
+  "username": "bob",
+  "email": "bob@acme.com",
+  "org": "acme-corp",
+  "role": "editor",
+  "created_at": "2024-12-01T10:00:00Z",
+  "expires_at": "2024-12-03T10:00:00Z",
+  "accepted_at": null,
+  "status": "pending"
+}
+```
+
+#### cve
 ```json
 {
   "_key": "CVE-2024-1234",
   "id": "CVE-2024-1234",
-  "severity": [
+  "summary": "Buffer overflow in lodash",
+  "details": "An attacker can...",
+  "aliases": ["GHSA-xxxx-yyyy"],
+  "published": "2024-11-15T00:00:00Z",
+  "modified": "2024-11-16T00:00:00Z",
+  
+  "cvss_base_score": 9.8,
+  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+  "severity_rating": "CRITICAL",
+  
+  "affected": [
     {
-      "type": "CVSS_V3",
-      "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+      "package": {
+        "ecosystem": "npm",
+        "name": "lodash"
+      },
+      "ranges": [
+        {
+          "type": "SEMVER",
+          "events": [
+            {"introduced": "0"},
+            {"fixed": "4.17.21"}
+          ]
+        }
+      ]
     }
   ],
-  "database_specific": {
-    "cvss_base_score": 9.8,
-    "cvss_base_scores": [9.8],
-    "severity_rating": "CRITICAL"
-  }
-}
-```
-
-**Field Descriptions:**
-
-- `cvss_base_score`: Highest numeric CVSS score (used for sorting and display)
-- `cvss_base_scores`: Array of all calculated scores (for CVEs with multiple CVSS vectors)
-- `severity_rating`: String value (CRITICAL, HIGH, MEDIUM, LOW, NONE) used for filtering
-
-**Default Values:**
-CVEs without parseable CVSS vectors receive:
-
-- `cvss_base_score`: 0.1
-- `cvss_base_scores`: [0.1]
-- `severity_rating`: "LOW"
-
-## CVSS Score Calculation Pipeline
-
-### Ingestion Process
-
-```mermaid
-flowchart TB
-    Start["OSV.dev CVE Data"] --> Extract
-    Extract["Extract CVSS Vector Strings<br/>from severity[] array"] --> Parse
-    
-    subgraph Parse["Parse Each CVSS Vector"]
-        V30["CVSS:3.0/*<br/>→ Parse with pandatix/go-cvss v31"]
-        V31["CVSS:3.1/*<br/>→ Parse with pandatix/go-cvss v31"]
-        V40["CVSS:4.0/*<br/>→ Parse with pandatix/go-cvss v40"]
-    end
-    
-    Parse --> Calc["Calculate Base Score (0.0 - 10.0)"]
-    
-    Calc --> Det["Determine Severity Rating"]
-    
-    subgraph Det
-        C["9.0-10.0 → CRITICAL"]
-        H["7.0-8.9 → HIGH"]
-        M["4.0-6.9 → MEDIUM"]
-        L["0.1-3.9 → LOW"]
-        N["0.0 → NONE"]
-    end
-    
-    Det --> Store["Store in database_specific field"]
-    Store --> Upsert["UPSERT CVE document to ArangoDB"]
-    
-    style Start fill:#e3f2fd
-    style Parse fill:#fff3bf
-    style Det fill:#ffd43b
-    style Upsert fill:#51cf66
-```
-
-### Query Optimization
-
-```mermaid
-flowchart LR
-    subgraph Before["BEFORE (Runtime Parsing)"]
-        B1["Query"] --> B2["For each CVE:<br/>Parse CVSS vector"]
-        B2 --> B3["Calculate score"]
-        B3 --> B4["Compare to threshold"]
-        B5["Result: Slow,<br/>O(n) parsing operations"]
-    end
-    
-    subgraph After["AFTER (Pre-Calculated)"]
-        A1["Query"] --> A2["Filter by severity_rating string"]
-        A3["Result: Fast,<br/>indexed string comparison"]
-    end
-    
-    Before -.->|Performance Impact:<br/>~5-10s → <1s for 100K CVEs| After
-    
-    style Before fill:#ffe0e0
-    style After fill:#e0ffe0
-    style B5 fill:#ff6b6b
-    style A3 fill:#51cf66
-```
-
-## Sync and Endpoint Architecture
-
-### Endpoint Management
-
-Endpoints represent deployment targets where releases are synced (deployed). Each endpoint has:
-
-- **Name**: Unique identifier for the endpoint
-- **Type**: Classification of the deployment target
-- **Environment**: Operational context (production, staging, development)
-
-**Supported Endpoint Types:**
-
-- **Cloud Infrastructure**: cluster, ec2, lambda, ecs, eks, gke, aks, fargate
-- **Edge Computing**: edge, iot
-- **Mission Assets**: mission_asset (military and defense systems including satellites, ground systems, aircraft, ships, submarines, tanks, command posts, etc.)
-
-### Sync Records
-
-Sync records track when a specific release version is deployed to an endpoint:
-
-```json
-{
-  "release_name": "my-api-service",
-  "release_version": "v2.1.0",
-  "endpoint_name": "production-us-east-1",
-  "synced_at": "2024-01-15T10:30:00Z"
-}
-```
-
-**Unique Constraint**: Combination of `release_name + release_version + endpoint_name` ensures idempotent sync operations.
-
-**Use Cases:**
-
-- Track deployment history for audit trails
-- Identify which releases are currently running on which endpoints
-- Determine blast radius of vulnerabilities (how many endpoints affected)
-- Generate deployment reports by environment or endpoint type
-
-## Core Operations
-
-### 1. CVE Ingestion with CVSS Calculation
-
-**Process:**
-
-```bash
-# Scheduled job runs periodically
-./pdvd-backend/v12
-```
-
-**Steps:**
-
-```mermaid
-flowchart TB
-    Start["CVE Ingestion Job Starts"] --> Download
-    Download["1. Download CVE data from OSV.dev<br/>for all ecosystems"] --> ForEach
-    
-    ForEach["2. For each CVE:"] --> Extract
-    Extract["Extract CVSS vector strings<br/>from severity array"] --> Parse
-    Parse["Parse vectors using<br/>github.com/pandatix/go-cvss library"] --> Calculate
-    Calculate["Calculate numeric base scores"] --> Determine
-    Determine["Determine severity rating<br/>(CRITICAL/HIGH/MEDIUM/LOW)"] --> Store
-    Store["Store in database_specific field"] --> PURLs
-    
-    PURLs["3. Extract base PURLs<br/>(package identifiers without versions)"] --> Edges
-    Edges["4. Create CVE → PURL edges in graph"] --> Enrich
-    Enrich["5. Enrich with MITRE ATT&CK techniques<br/>(if configured)"] --> Upsert
-    Upsert["6. UPSERT to database"]
-    
-    style Start fill:#e3f2fd
-    style Parse fill:#fff3bf
-    style Determine fill:#ffd43b
-    style Upsert fill:#51cf66
-```
-
-### 2. Release and SBOM Upload
-
-**API Endpoint:**
-
-```bash
-POST /api/v1/releases
-```
-
-**Request Body (ReleaseWithSBOM):**
-
-```json
-{
-  "name": "my-service",
-  "version": "1.0.0",
-  "projecttype": "application",
-  "contentsha": "abc123def456",
-  "giturl": "https://github.com/org/repo",
-  "gitbranch": "main",
-  "gitcommit": "abc123",
-  "gitcommittimestamp": "2024-01-15T10:00:00Z",
-  "sbom": {
-    "content": {
-      "bomFormat": "CycloneDX",
-      "specVersion": "1.4",
-      "components": [...]
+  
+  "references": [
+    {
+      "type": "ADVISORY",
+      "url": "https://nvd.nist.gov/vuln/detail/CVE-2024-1234"
     }
-  }
+  ]
 }
 ```
 
-**Process:**
-
-```mermaid
-flowchart TB
-    Start["API Request Received"] --> Validate
-    Validate["1. Validate SBOM structure<br/>(must be CycloneDX format)"] --> Extract
-    Extract["2. Extract components and their PURLs"] --> CreatePURL
-    CreatePURL["3. Create or retrieve PURL nodes<br/>(base identifiers)"] --> CreateRelease
-    CreateRelease["4. Create Release node<br/>with git metadata"] --> CreateSBOM
-    CreateSBOM["5. Create SBOM node<br/>with content hash"] --> EdgeRS
-    EdgeRS["6. Create Release → SBOM edge"] --> EdgeSP
-    EdgeSP["7. Create SBOM → PURL edges<br/>with version metadata"] --> Response
-    Response["8. Return success response"]
-    
-    style Start fill:#e3f2fd
-    style Validate fill:#fff3bf
-    style Response fill:#51cf66
-```
-
-### 3. Endpoint Sync
-
-**API Endpoint:**
-
-```bash
-POST /api/v1/sync
-```
-
-**Request Body:**
-
+#### purl
 ```json
 {
-  "release_name": "my-service",
-  "release_version": "1.0.0",
-  "endpoint_name": "prod-k8s-us-east"
+  "_key": "pkg:npm/lodash",
+  "purl": "pkg:npm/lodash",
+  "type": "npm",
+  "namespace": null,
+  "name": "lodash",
+  "version": null,
+  "qualifiers": {},
+  "subpath": null
 }
 ```
 
-**Process:**
-
-```mermaid
-flowchart TB
-    Start["Sync Request Received"] --> Validate
-    Validate["1. Validate release exists"] --> CreateEndpoint
-    CreateEndpoint["2. Create or retrieve endpoint"] --> CreateSync
-    CreateSync["3. Create sync record with timestamp"] --> Handle
-    Handle["4. Handle idempotent updates<br/>(unique constraint)"] --> Response
-    Response["5. Return success response"]
-    
-    style Start fill:#e3f2fd
-    style Response fill:#51cf66
-```
-
-### 4. Vulnerability Queries
-
-#### Query CVEs Affecting a Release
-
-**GraphQL Query:**
-
-```graphql
-query GetRelease($name: String!, $version: String!) {
-  release(name: $name, version: $version) {
-    name
-    version
-    vulnerabilities {
-      cve_id
-      severity_score
-      severity_rating
-      package
-      affected_version
-      summary
-    }
-  }
-}
-```
-
-**Graph Traversal:**
-
-```mermaid
-flowchart LR
-    Release["Release"] --> SBOM["SBOM"]
-    SBOM -->|SBOM2PURL<br/>with version| PURL["PURL"]
-    PURL --> CVE["CVE"]
-    CVE --> Filter["Filter by<br/>version match"]
-    
-    style Release fill:#fff0e0
-    style SBOM fill:#69db7c
-    style PURL fill:#4dabf7
-    style CVE fill:#ff6b6b
-    style Filter fill:#ffd43b
-```
-
-#### Query Releases Affected by Severity
-
-**GraphQL Query:**
-
-```graphql
-query GetAffectedReleases($severity: Severity!, $limit: Int) {
-  affectedReleases(severity: $severity, limit: $limit) {
-    cve_id
-    severity_score
-    severity_rating
-    package
-    affected_version
-    release_name
-    release_version
-  }
-}
-```
-
-#### Query Affected Endpoints for a Release
-
-**GraphQL Query:**
-
-```graphql
-query GetAffectedEndpoints($name: String!, $version: String!) {
-  affectedEndpoints(name: $name, version: $version) {
-    endpoint_name
-    endpoint_url
-    endpoint_type
-    environment
-    last_sync
-    status
-  }
-}
-```
-
-#### Query All Vulnerabilities (Mitigations View)
-
-**GraphQL Query:**
-
-```graphql
-query GetVulnerabilities($limit: Int) {
-  vulnerabilities(limit: $limit) {
-    cve_id
-    summary
-    severity_score
-    severity_rating
-    package
-    affected_version
-    full_purl
-    fixed_in
-    affected_releases
-    affected_endpoints
-  }
-}
-```
-
-**Response:**
-
+#### sbom
 ```json
 {
-  "data": {
-    "vulnerabilities": [
+  "_key": "sbom_payment-service_2.1.0",
+  "release_name": "payment-service",
+  "release_version": "2.1.0",
+  "org": "acme-corp",
+  "format": "CycloneDX",
+  "spec_version": "1.5",
+  "content": {
+    "bomFormat": "CycloneDX",
+    "specVersion": "1.5",
+    "components": [
       {
-        "cve_id": "CVE-2024-1234",
-        "summary": "Prototype pollution vulnerability",
-        "severity_score": 9.8,
-        "severity_rating": "CRITICAL",
-        "package": "pkg:npm/lodash",
-        "affected_version": "4.17.20",
-        "full_purl": "pkg:npm/lodash@4.17.20",
-        "fixed_in": ["4.17.21"],
-        "affected_releases": 15,
-        "affected_endpoints": 23
+        "type": "library",
+        "name": "lodash",
+        "version": "4.17.20",
+        "purl": "pkg:npm/lodash@4.17.20"
       }
     ]
+  },
+  "created_at": "2024-12-01T00:00:00Z"
+}
+```
+
+#### release
+```json
+{
+  "_key": "payment-service_2.1.0",
+  "name": "payment-service",
+  "version": "2.1.0",
+  "org": "acme-corp",
+  "is_public": false,
+  
+  "gitcommit": "abc123def456",
+  "giturl": "https://github.com/acme/payment-service",
+  "gitbranch": "main",
+  "gitrepo": "acme/payment-service",
+  
+  "builddate": "2024-12-01T00:00:00Z",
+  "buildid": "build-456",
+  "buildurl": "https://ci.acme.com/builds/456",
+  
+  "dockerrepo": "acme/payment-service",
+  "dockersha": "sha256:abc...",
+  "dockertag": "2.1.0",
+  
+  "content_sha": "sha256:def...",
+  "openssf_scorecard_score": 8.5,
+  
+  "created_at": "2024-12-01T00:00:00Z"
+}
+```
+
+#### endpoint
+```json
+{
+  "_key": "prod-us-east-1",
+  "name": "prod-us-east-1",
+  "org": "acme-corp",
+  "endpoint_type": "eks",
+  "environment": "production",
+  "is_mission_asset": true,
+  
+  "metadata": {
+    "cluster_name": "prod-us-east-1",
+    "region": "us-east-1",
+    "namespace": "payment-services",
+    "owner_team": "platform-eng"
+  },
+  
+  "created_at": "2024-01-01T00:00:00Z"
+}
+```
+
+#### sync
+```json
+{
+  "_key": "sync_prod-us-east-1_1733011200",
+  "endpoint_name": "prod-us-east-1",
+  "org": "acme-corp",
+  "timestamp": "2024-12-01T00:00:00Z",
+  
+  "releases": [
+    {
+      "name": "payment-service",
+      "version": "2.1.0"
+    }
+  ],
+  
+  "metadata": {
+    "sync_method": "k8s-operator",
+    "sync_agent": "pdvd-agent-v1.2.3"
   }
 }
 ```
 
-### 5. Severity-Based Impact Analysis
+#### cve_lifecycle
+```json
+{
+  "_key": "lifecycle_CVE-2024-1234_prod-us-east-1_payment-service_2.1.0",
+  "cve_id": "CVE-2024-1234",
+  "endpoint_name": "prod-us-east-1",
+  "release_name": "payment-service",
+  "release_version": "2.1.0",
+  "org": "acme-corp",
+  
+  "introduced_at": "2024-12-01T00:00:00Z",
+  "root_introduced_at": "2024-12-01T00:00:00Z",
+  "remediated_at": null,
+  "is_remediated": false,
+  
+  "disclosed_after_deployment": false,
+  "is_mission_asset": true,
+  
+  "sla_target_days": 7,
+  "days_open": 15,
+  "days_to_remediate": null,
+  "is_beyond_sla": true
+}
+```
 
-**Query Releases by Severity:**
+### Edge Collections
+
+#### sbom2purl
+```json
+{
+  "_from": "sbom/sbom_payment-service_2.1.0",
+  "_to": "purl/pkg:npm/lodash",
+  "version": "4.17.20",
+  "scope": "required"
+}
+```
+
+#### cve2purl
+```json
+{
+  "_from": "cve/CVE-2024-1234",
+  "_to": "purl/pkg:npm/lodash",
+  "affects_versions": ["<4.17.21"],
+  "fixed_in": "4.17.21"
+}
+```
+
+#### release2cve (Materialized)
+```json
+{
+  "_from": "release/payment-service_2.1.0",
+  "_to": "cve/CVE-2024-1234",
+  "package": "lodash",
+  "version": "4.17.20",
+  "severity_rating": "CRITICAL",
+  "cvss_base_score": 9.8
+}
+```
+
+---
+
+## API Specification
+
+### REST Endpoints
+
+#### Authentication
 
 ```bash
-GET /api/v1/graphql
-```
+# Sign-up
+POST /api/v1/signup
+Content-Type: application/json
 
-**GraphQL Query:**
+{
+  "username": "alice",
+  "email": "alice@acme.com",
+  "first_name": "Alice",
+  "last_name": "Smith",
+  "organization": "acme-corp",
+  "password": "optional-if-invite"
+}
 
-```graphql
-query GetAffectedReleases($severity: Severity!, $limit: Int) {
-  affectedReleases(severity: $severity, limit: $limit) {
-    cve_id
-    severity_score
-    severity_rating
-    package
-    affected_version
-    release_name
-    release_version
-    content_sha
-    project_type
+Response: 201 Created
+{
+  "message": "User created. Check email for invitation.",
+  "username": "alice",
+  "invitation_sent": true
+}
+
+# Login
+POST /api/v1/auth/login
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "password": "secure-password"
+}
+
+Response: 200 OK
+Set-Cookie: auth_token=<jwt>; HttpOnly; Secure
+{
+  "message": "Login successful",
+  "user": {
+    "username": "alice",
+    "email": "alice@acme.com",
+    "orgs": ["acme-corp"],
+    "role": "owner"
   }
 }
+
+# Accept Invitation
+POST /api/v1/invitation/:token/accept
+Content-Type: application/json
+
+{
+  "password": "new-secure-password"
+}
+
+Response: 200 OK
+Set-Cookie: auth_token=<jwt>
+{
+  "message": "Account activated",
+  "user": { ... }
+}
+
+# Logout
+POST /api/v1/auth/logout
+
+Response: 200 OK
+Set-Cookie: auth_token=; Max-Age=0
 ```
 
-**Query Endpoints by Severity:**
+#### Releases
 
-```graphql
-query GetSyncedEndpoints($limit: Int) {
-  syncedEndpoints(limit: $limit) {
-    endpoint_name
-    total_vulnerabilities {
-      critical
-      high
-      medium
-      low
+```bash
+# Upload Release + SBOM
+POST /api/v1/releases
+Authorization: Cookie auth_token=<jwt>
+Content-Type: application/json
+
+{
+  "name": "payment-service",
+  "version": "2.1.0",
+  "org": "acme-corp",
+  "gitcommit": "abc123",
+  "giturl": "https://github.com/acme/payment-service",
+  "builddate": "2024-12-01T00:00:00Z",
+  "sbom": {
+    "content": { /* CycloneDX JSON */ }
+  }
+}
+
+Response: 201 Created
+{
+  "release": {
+    "_key": "payment-service_2.1.0",
+    "name": "payment-service",
+    "version": "2.1.0"
+  },
+  "vulnerabilities_found": 3,
+  "critical": 1,
+  "high": 2
+}
+
+# Get Release Details
+GET /api/v1/releases/payment-service/2.1.0
+Authorization: Cookie auth_token=<jwt>
+
+Response: 200 OK
+{
+  "release": { ... },
+  "vulnerabilities": [
+    {
+      "cve_id": "CVE-2024-1234",
+      "severity_rating": "CRITICAL",
+      "package": "lodash",
+      "version": "4.17.20",
+      "fixed_in": "4.17.21"
     }
+  ],
+  "synced_endpoints": [
+    {
+      "endpoint_name": "prod-us-east-1",
+      "environment": "production",
+      "last_sync": "2024-12-01T00:00:00Z"
+    }
+  ]
+}
+```
+
+#### Sync (Deployments)
+
+```bash
+# Sync Endpoint
+POST /api/v1/sync
+Authorization: Cookie auth_token=<jwt>
+Content-Type: application/json
+
+{
+  "endpoint_name": "prod-us-east-1",
+  "releases": [
+    {
+      "release": {
+        "name": "payment-service",
+        "version": "2.1.0"
+      }
+    }
+  ],
+  "endpoint": {
+    "name": "prod-us-east-1",
+    "org": "acme-corp",
+    "endpoint_type": "eks",
+    "environment": "production"
+  }
+}
+
+Response: 200 OK
+{
+  "sync_id": "sync_prod-us-east-1_1733011200",
+  "endpoint_name": "prod-us-east-1",
+  "releases_synced": 1,
+  "lifecycle_updates": {
+    "introduced": 0,
+    "superseded": 2,
+    "remediated": 1
   }
 }
 ```
 
-## Deployment Considerations
+#### Dashboard
 
-### Database Indexes
+```bash
+# Get MTTR Dashboard
+GET /api/v1/dashboard/mttr?days=180&org=acme-corp
+Authorization: Cookie auth_token=<jwt>
 
-**Required Indexes for Optimal Performance:**
-
-```javascript
-// Create index on severity rating for fast filtering
-db.cve.ensureIndex({
-  type: "persistent",
-  fields: ["database_specific.severity_rating"]
-});
-
-// Existing indexes
-db.release.ensureIndex({
-  type: "persistent",
-  fields: ["name", "version"],
-  unique: true
-});
-
-db.sbom2purl.ensureIndex({
-  type: "persistent",
-  fields: ["_to", "version"]
-});
+Response: 200 OK
+{
+  "executive_summary": {
+    "total_new_cves": 145,
+    "mttr_all": 23.4,
+    "mttr_post_deployment": 18.7,
+    "mean_open_age": 45.2,
+    "open_cves_beyond_sla_pct": 13.2
+  },
+  "by_severity": [
+    {
+      "severity": "CRITICAL",
+      "mttr": 8.2,
+      "open_count": 3,
+      "fixed_within_sla_pct": 92.5
+    }
+  ],
+  "by_endpoint": [
+    {
+      "endpoint_name": "prod-us-east-1",
+      "total_cves": 23,
+      "critical": 1,
+      "high": 5
+    }
+  ]
+}
 ```
 
-### Rolling Update Strategy
+### GraphQL Schema
 
-The system supports zero-downtime deployments through rolling updates:
+```graphql
+type Query {
+  # Releases
+  release(name: String!, version: String!): Release
+  releases(org: String, limit: Int, offset: Int): [Release!]!
+  
+  # CVEs
+  cve(id: String!): CVE
+  cves(severity: Severity, org: String): [CVE!]!
+  
+  # Endpoints
+  endpoint(name: String!): Endpoint
+  endpoints(org: String, environment: String): [Endpoint!]!
+  
+  # Dashboard
+  dashboardMTTR(days: Int!, org: String): DashboardMTTR!
+  orgAggregatedReleases(severity: Severity): [OrgAggregation!]!
+  
+  # Organizations
+  organizations: [Organization!]!
+  organization(name: String!): Organization
+  
+  # Users
+  currentUser: User!
+  users(org: String): [User!]!
+}
 
-**Deployment Process:**
+type Mutation {
+  # Auth
+  signup(input: SignupInput!): SignupResult!
+  login(username: String!, password: String!): LoginResult!
+  acceptInvitation(token: String!, password: String!): LoginResult!
+  
+  # Releases
+  uploadRelease(input: ReleaseInput!): Release!
+  
+  # Sync
+  syncDeployment(input: SyncInput!): SyncResult!
+  
+  # Organizations
+  createOrganization(input: OrgInput!): Organization!
+  inviteUser(input: InviteInput!): InvitationResult!
+}
+
+type Release {
+  name: String!
+  version: String!
+  org: String
+  gitcommit: String
+  builddate: String
+  vulnerabilities: [Vulnerability!]!
+  synced_endpoints: [SyncedEndpoint!]!
+  openssf_scorecard_score: Float
+}
+
+type CVE {
+  id: String!
+  summary: String
+  cvss_base_score: Float!
+  severity_rating: String!
+  published: String
+  affected_releases: [Release!]!
+}
+
+type Endpoint {
+  name: String!
+  org: String
+  endpoint_type: String!
+  environment: String!
+  is_mission_asset: Boolean!
+  current_releases: [Release!]!
+}
+
+type DashboardMTTR {
+  executive_summary: ExecutiveSummary!
+  by_severity: [SeverityMetrics!]!
+  by_endpoint: [EndpointMetrics!]!
+}
+
+enum Severity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+```
+
+---
+
+## CVE Lifecycle Management
+
+### Lifecycle States
 
 ```mermaid
-flowchart LR
-    Step1["1. New version deployed<br/>alongside existing"] --> Step2
-    Step2["2. Health checks verify<br/>new instances ready"] --> Step3
-    Step3["3. Traffic gradually shifted<br/>to new instances"] --> Step4
-    Step4["4. Old instances drained<br/>and terminated"] --> Step5
-    Step5["5. Database migrations<br/>run automatically"]
+stateDiagram-v2
+    [*] --> Detected: CVE found in SBOM
     
-    style Step1 fill:#e3f2fd
-    style Step2 fill:#fff3bf
-    style Step3 fill:#ffd43b
-    style Step4 fill:#69db7c
-    style Step5 fill:#51cf66
+    Detected --> Active: Deployed to endpoint
+    Detected --> Inactive: Never deployed
+    
+    Active --> Superseded: New version deployed<br/>(CVE still present)
+    Active --> Remediated: Fixed version deployed
+    
+    Superseded --> Active: Rollback to old version
+    Superseded --> Remediated: Fixed version deployed
+    
+    Inactive --> Active: Old version deployed
+    
+    Remediated --> [*]
+    Inactive --> [*]
+    
+    note right of Detected
+        State: introduced_at set
+        Tracks: root_introduced_at
+    end note
+    
+    note right of Active
+        State: Currently in production
+        Tracks: disclosed_after_deployment
+        Calculates: days_open, is_beyond_sla
+    end note
+    
+    note right of Remediated
+        State: remediated_at set
+        Calculates: days_to_remediate
+        MTTR = remediated_at - root_introduced_at
+    end note
 ```
 
-**Benefits:**
+### MTTR Calculation
 
-- No maintenance window required
-- Continuous service availability during updates
-- Automatic rollback capability if health checks fail
-- Gradual traffic migration minimizes risk
+```
+MTTR (Mean Time To Remediate) = Average(days_to_remediate) for all remediated CVEs
 
-**Kubernetes Example:**
+days_to_remediate = remediated_at - root_introduced_at
+
+Where:
+- root_introduced_at = earliest timestamp CVE was detected (across all versions)
+- remediated_at = timestamp when fixed version was deployed
+- Only includes CVEs that are is_remediated = true
+```
+
+### SLA Compliance
+
+```mermaid
+graph TB
+    CVE[New CVE Detected] --> CheckSev{Check Severity}
+    
+    CheckSev -->|CRITICAL| CheckMission1{Mission Asset?}
+    CheckMission1 -->|Yes| SLA7[SLA: 7 days]
+    CheckMission1 -->|No| SLA15[SLA: 15 days]
+    
+    CheckSev -->|HIGH| CheckMission2{Mission Asset?}
+    CheckMission2 -->|Yes| SLA15b[SLA: 15 days]
+    CheckMission2 -->|No| SLA30[SLA: 30 days]
+    
+    CheckSev -->|MEDIUM| SLA90[SLA: 90 days]
+    CheckSev -->|LOW| SLA180[SLA: 180 days]
+    
+    SLA7 --> Track[Track days_open]
+    SLA15 --> Track
+    SLA15b --> Track
+    SLA30 --> Track
+    SLA90 --> Track
+    SLA180 --> Track
+    
+    Track --> Compare{days_open > SLA?}
+    Compare -->|Yes| Beyond[is_beyond_sla = true<br/>Alert team]
+    Compare -->|No| Within[is_beyond_sla = false<br/>Continue monitoring]
+    
+    style SLA7 fill:#ff6b6b
+    style SLA15 fill:#ffa94d
+    style SLA30 fill:#ffd43b
+    style Beyond fill:#ffe0e0
+    style Within fill:#e0ffe0
+```
+
+### Post-Deployment Detection
+
+```mermaid
+sequenceDiagram
+    participant OSV as OSV.dev
+    participant Ingest as CVE Ingestion Job
+    participant DB as ArangoDB
+    participant Alert as Alert System
+    
+    Note over OSV,Ingest: New CVE Published
+    OSV->>Ingest: CVE-2024-XXXX disclosed
+    Ingest->>DB: INSERT cve
+    Ingest->>DB: CREATE cve2purl edges
+    
+    rect rgb(240, 240, 255)
+        Note over Ingest,DB: Find Affected Releases
+        Ingest->>DB: QUERY releases via purl hub
+        DB->>Ingest: Returns matching releases
+    end
+    
+    rect rgb(255, 240, 240)
+        Note over Ingest,Alert: Check Deployment Status
+        Ingest->>DB: QUERY sync records
+        DB->>Ingest: Returns active deployments
+        
+        alt CVE disclosed after deployment
+            Ingest->>DB: UPDATE cve_lifecycle<br/>disclosed_after_deployment=true
+            Ingest->>Alert: Send critical alert
+            Alert->>Alert: Create Jira ticket
+            Alert->>Alert: Send Slack notification
+        else CVE disclosed before deployment
+            Ingest->>DB: INSERT cve_lifecycle<br/>disclosed_after_deployment=false
+        end
+    end
+```
+
+---
+
+## Hub-and-Spoke Graph Design
+
+### Traditional vs Hub-and-Spoke
+
+```mermaid
+graph TB
+    subgraph Traditional["Traditional: O(N×M) = 10M edges"]
+        T_CVE1[CVE-1] -.-> T_SBOM1[SBOM-1]
+        T_CVE1 -.-> T_SBOM2[SBOM-2]
+        T_CVE1 -.-> T_SBOM3[...]
+        T_CVE2[CVE-2] -.-> T_SBOM1
+        T_CVE2 -.-> T_SBOM2
+        T_CVE2 -.-> T_SBOM3
+        T_CVE3[...] -.-> T_SBOM1
+        T_CVE3 -.-> T_SBOM2
+        T_CVE3 -.-> T_SBOM3
+        T_NOTE[1,000 CVEs × 10,000 SBOMs<br/>= 10,000,000 edges]
+    end
+    
+    subgraph HubSpoke["Hub-and-Spoke: O(N+M) = 11K edges"]
+        H_CVE1[CVE-1] --> H_HUB[PURL Hub<br/>pkg:npm/lodash]
+        H_CVE2[CVE-2] --> H_HUB
+        H_CVE3[...] --> H_HUB
+        H_HUB --> H_SBOM1[SBOM-1]
+        H_HUB --> H_SBOM2[SBOM-2]
+        H_HUB --> H_SBOM3[...]
+        H_NOTE[1,000 CVEs + 10,000 SBOMs<br/>= 11,000 edges<br/>99.89% reduction]
+    end
+    
+    style Traditional fill:#ffe0e0
+    style HubSpoke fill:#e0ffe0
+    style H_HUB fill:#4dabf7
+```
+
+### Query Performance
+
+```
+Traditional Graph (N×M):
+  Query: "Find all SBOMs affected by CVE-2024-1234"
+  Complexity: O(M) = 10,000 edge traversals
+  Time: ~30 seconds
+
+Hub-and-Spoke (N+M):
+  Query: "Find all SBOMs affected by CVE-2024-1234"
+  Complexity: O(1 + K) where K = affected SBOMs
+  Time: <3 seconds
+
+Speedup: 10x faster for typical queries
+```
+
+### PURL Hub Design
+
+```mermaid
+graph LR
+    subgraph CVEs["CVE Nodes"]
+        C1[CVE-2024-1234<br/>affects: lodash<4.17.21]
+        C2[CVE-2023-5678<br/>affects: lodash>=4.0.0 <4.17.19]
+    end
+    
+    subgraph Hub["PURL Hub (Version-Free)"]
+        P[pkg:npm/lodash<br/>Version: NULL]
+    end
+    
+    subgraph SBOMs["SBOM Nodes"]
+        S1[SBOM-1<br/>contains: lodash@4.17.20]
+        S2[SBOM-2<br/>contains: lodash@4.17.18]
+        S3[SBOM-3<br/>contains: lodash@4.18.0]
+    end
+    
+    C1 -->|cve2purl<br/>affects_versions| P
+    C2 -->|cve2purl<br/>affects_versions| P
+    
+    P -->|sbom2purl<br/>version: 4.17.20| S1
+    P -->|sbom2purl<br/>version: 4.17.18| S2
+    P -->|sbom2purl<br/>version: 4.18.0| S3
+    
+    style P fill:#4dabf7,stroke:#1971c2,stroke-width:3px
+```
+
+### Version Matching Algorithm
+
+```go
+// Pseudo-code for version matching
+func findAffectedSBOMs(cve CVE, purl PURLHub) []SBOM {
+    // 1. Find all SBOMs connected to this PURL hub
+    sboms := graph.OutboundEdges(purl, "sbom2purl")
+    
+    affected := []SBOM{}
+    for _, sbom := range sboms {
+        version := sbom.Edge.Version
+        
+        // 2. Check if SBOM version matches CVE affected ranges
+        if cve.AffectsVersion(version) {
+            affected = append(affected, sbom)
+        }
+    }
+    
+    return affected
+}
+
+func (cve *CVE) AffectsVersion(version string) bool {
+    for _, affectedPkg := range cve.Affected {
+        for _, versionRange := range affectedPkg.Ranges {
+            if versionRange.Contains(version) {
+                return true
+            }
+        }
+    }
+    return false
+}
+```
+
+---
+
+## Deployment Architecture
+
+### High-Availability Setup
+
+```mermaid
+graph TB
+    subgraph LoadBalancer["Load Balancer (ALB/NLB)"]
+        LB[HTTPS:443<br/>TLS Termination]
+    end
+    
+    subgraph APICluster["API Cluster (3 replicas)"]
+        API1[PDVD API Pod 1]
+        API2[PDVD API Pod 2]
+        API3[PDVD API Pod 3]
+    end
+    
+    subgraph Workers["Background Workers"]
+        CVEJob[CVE Ingestion<br/>CronJob: 0 */6 * * *]
+        RBACSync[RBAC Sync<br/>Webhook Trigger]
+        MTTRCalc[MTTR Calculator<br/>CronJob: 0 0 * * *]
+    end
+    
+    subgraph Database["ArangoDB Cluster"]
+        ArangoLead[Leader Node]
+        ArangoFollow1[Follower 1]
+        ArangoFollow2[Follower 2]
+    end
+    
+    subgraph External["External Services"]
+        OSV[OSV.dev]
+        GitHub[GitHub]
+        SMTP[SMTP]
+    end
+    
+    LB --> API1
+    LB --> API2
+    LB --> API3
+    
+    API1 --> ArangoLead
+    API2 --> ArangoLead
+    API3 --> ArangoLead
+    
+    CVEJob --> OSV
+    CVEJob --> ArangoLead
+    
+    RBACSync --> GitHub
+    RBACSync --> ArangoLead
+    
+    MTTRCalc --> ArangoLead
+    
+    API1 -.-> SMTP
+    API2 -.-> SMTP
+    API3 -.-> SMTP
+    
+    ArangoLead -.->|Replication| ArangoFollow1
+    ArangoLead -.->|Replication| ArangoFollow2
+    
+    style ArangoLead fill:#ff6b6b
+    style ArangoFollow1 fill:#ffa94d
+    style ArangoFollow2 fill:#ffa94d
+```
+
+### Kubernetes Manifests
 
 ```yaml
+# api-deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: cve-tracker-api
+  name: pdvd-api
+  namespace: pdvd
 spec:
   replicas: 3
-  strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: pdvd-api
   template:
+    metadata:
+      labels:
+        app: pdvd-api
     spec:
       containers:
       - name: api
+        image: pdvd/backend:v2.0.0
+        ports:
+        - containerPort: 3000
+        env:
+        - name: ARANGO_HOST
+          valueFrom:
+            secretKeyRef:
+              name: pdvd-secrets
+              key: arango-host
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: pdvd-secrets
+              key: jwt-secret
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 2000m
+            memory: 4Gi
         livenessProbe:
           httpGet:
-            path: /
-            port: 8080
+            path: /health
+            port: 3000
+          initialDelaySeconds: 30
+          periodSeconds: 10
         readinessProbe:
           httpGet:
-            path: /
-            port: 8080
+            path: /ready
+            port: 3000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+# cve-ingestion-cronjob.yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cve-ingestion
+  namespace: pdvd
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: ingest
+            image: pdvd/backend:v2.0.0
+            command: ["./pdvd-cli", "ingest-cves"]
+            env:
+            - name: ARANGO_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: pdvd-secrets
+                  key: arango-host
+          restartPolicy: OnFailure
 ```
 
-### CVE Re-Ingestion
+---
 
-**Important:** Existing CVEs need to be re-processed to populate CVSS scores.
+## Security Considerations
 
-**Options:**
-
-1. **Full Re-Ingestion** (Recommended)
-
-   ```bash
-   # Clear existing CVEs
-   # Run CVE loader with CVSS calculation
-   ./pdvd-backend/v12
-   ```
-
-2. **Migration Script** (For large datasets)
-
-   ```javascript
-   // ArangoDB migration to set default LOW severity
-   FOR cve IN cve
-     FILTER cve.database_specific.severity_rating == null
-     UPDATE cve WITH {
-       database_specific: MERGE(
-         cve.database_specific || {},
-         {
-           cvss_base_score: 0.1,
-           cvss_base_scores: [0.1],
-           severity_rating: "LOW"
-         }
-       )
-     } IN cve
-   ```
-
-### Configuration
-
-**Environment Variables:**
-
-```bash
-# CVSS Calculation
-ENABLE_CVSS_CALCULATION=true
-
-# Logging
-LOG_LEVEL=info
-LOG_CVSS_PARSE_ERRORS=true
-
-# Database
-ARANGO_HOST=localhost
-ARANGO_PORT=8529
-ARANGO_USER=root
-ARANGO_PASS=password
-ARANGO_URL=http://localhost:8529
-
-# MITRE ATT&CK (optional)
-MITRE_MAPPING_URL=https://your-mitre-service/api/map
-
-# Performance
-MAX_CONCURRENT_REQUESTS=100
-REQUEST_TIMEOUT=3s
-```
-
-## Conclusion
-
-This Post-Deployment Vulnerability Remediation system provides comprehensive visibility into software vulnerabilities across the entire deployment lifecycle, organized around four key domains that answer critical security questions.
-
-The system connects CVE data with releases, SBOMs, and actual deployment endpoints, enabling security teams to:
-
-1. **Understand The Threat** - View all vulnerabilities with accurate CVSS scoring and severity classification
-2. **Identify Where to Fix** - Trace vulnerable packages to source code repositories and specific releases
-3. **Locate Where It's Running** - See exactly which production systems and environments are affected
-4. **Execute Remediation** - Take action through integrated workflows (Jira, GitHub, GitLab, AI auto-remediation)
-
-The hub-and-spoke architecture ensures scalability and performance, while the sync tracking mechanism provides the crucial link between code and production systems. The addition of pre-calculated CVSS scores and severity ratings enables efficient, real-time severity-based filtering and prioritization, with all API operations completing within 3 seconds to ensure optimal end-user experience. The
-rolling update deployment strategy ensures continuous availability, eliminating the need for maintenance windows while maintaining service quality.
-
-**Key Benefits:**
+### Threat Model
 
 ```mermaid
-mindmap
-  root((Post-Deployment<br/>Vulnerability<br/>Remediation))
-    Four Domains
-      Vulnerabilities (Threat)
-      Project Releases (Fix Location)
-      Synced Endpoints (Running Location)
-      Mitigations (Fix Actions)
-    Performance
-      All API responses <3s
-      Indexed severity ratings
-      Optimized AQL queries
-      Millions of CVEs efficiently
-    Accuracy
-      Official CVSS specification
-      Validated library
-      Complete CVE coverage
-    Scalability
-      Linear edge growth
-      Hub-and-spoke architecture
-      Optimized queries
-      COLLECT/AGGREGATE patterns
-    Availability
-      Rolling updates
-      99.9% uptime
-      Zero downtime deployments
-    Actionability
-      Jira integration
-      GitHub Issues
-      GitLab Issues
-      AI Auto-remediation
+graph TB
+    subgraph Threats["Threat Vectors"]
+        T1[Unauthorized Access]
+        T2[Data Exfiltration]
+        T3[Privilege Escalation]
+        T4[Injection Attacks]
+        T5[DoS/Resource Exhaustion]
+    end
+    
+    subgraph Mitigations["Security Controls"]
+        M1[JWT + HttpOnly Cookies]
+        M2[Org-Scoped Queries]
+        M3[RBAC Enforcement]
+        M4[Parameterized Queries]
+        M5[Rate Limiting]
+    end
+    
+    T1 --> M1
+    T2 --> M2
+    T3 --> M3
+    T4 --> M4
+    T5 --> M5
+    
+    M1 --> V1[✅ Verified]
+    M2 --> V2[✅ Verified]
+    M3 --> V3[✅ Verified]
+    M4 --> V4[✅ Verified]
+    M5 --> V5[⚠️ Roadmap]
+    
+    style V1 fill:#e0ffe0
+    style V2 fill:#e0ffe0
+    style V3 fill:#e0ffe0
+    style V4 fill:#e0ffe0
+    style V5 fill:#fff9e0
 ```
 
-- **Four-Domain Model**: Comprehensive view from threat identification to remediation execution
-- **Performance**: All API responses <3 seconds for optimal user experience
-- **Accuracy**: Uses official CVSS specification via validated library
-- **Completeness**: All CVEs have severity ratings, even those with missing data
-- **Scalability**: Indexed severity ratings support millions of CVEs efficiently
-- **Availability**: Rolling updates ensure zero-downtime deployments
-- **Reliability**: 99.9% uptime with no maintenance windows required
-- **Actionability**: Integrated workflows for Jira, GitHub, GitLab, and AI auto-remediation
-- **Query Optimization**: COLLECT/AGGREGATE/SORT patterns ensure efficient data processing
+### Best Practices
+
+1. **Password Security:**
+   - bcrypt with cost factor 10
+   - Minimum 8 characters
+   - Password complexity enforced
+
+2. **JWT Security:**
+   - 24-hour expiration
+   - HttpOnly cookies (XSS protection)
+   - Secure flag in production
+   - SameSite=Lax (CSRF protection)
+
+3. **Database Security:**
+   - Parameterized AQL queries (injection prevention)
+   - Least-privilege database user
+   - TLS encryption for connections
+   - Org-scoped queries via FILTER clause
+
+4. **API Security:**
+   - Authentication required on all endpoints (except /health)
+   - Rate limiting (roadmap)
+   - Input validation
+   - Error message sanitization
+
+5. **Secrets Management:**
+   - Kubernetes Secrets for credentials
+   - GitHub tokens rotated monthly
+   - SMTP passwords app-specific
+   - JWT secret 256-bit random
+
+---
+
+## Appendix
+
+### Glossary
+
+| Term | Definition |
+|------|------------|
+| **PURL** | Package URL - standardized package identifier (pkg:type/namespace/name@version) |
+| **Hub-and-Spoke** | Graph pattern using central hub nodes to reduce edge count |
+| **MTTR** | Mean Time To Remediate - average days from CVE discovery to fix deployment |
+| **SLA** | Service Level Agreement - target remediation time based on severity |
+| **SBOM** | Software Bill of Materials - inventory of software components |
+| **CVE** | Common Vulnerabilities and Exposures - unique vulnerability identifier |
+| **CVSS** | Common Vulnerability Scoring System - severity scoring standard (0-10) |
+| **GitOps** | Infrastructure/config as code with Git as source of truth |
+| **Materialized Edge** | Pre-computed edge stored for performance (e.g., release2cve) |
+
+### References
+
+- [NIST SP 800-218: Secure Software Development Framework](https://csrc.nist.gov/publications/detail/sp/800-218/final)
+- [NIST SP 800-190: Application Container Security Guide](https://csrc.nist.gov/publications/detail/sp/800-190/final)
+- [CycloneDX SBOM Specification](https://cyclonedx.org/specification/overview/)
+- [Package URL (PURL) Specification](https://github.com/package-url/purl-spec)
+- [OSV Schema](https://ossf.github.io/osv-schema/)
+- [CVSS v3.1 Specification](https://www.first.org/cvss/v3.1/specification-document)
+
+---
+
+**Document Control:**
+- Version: 2.0
+- Last Updated: January 2026
+- Next Review: April 2026
+- Owner: Platform Engineering Team
+- Classification: Internal Use

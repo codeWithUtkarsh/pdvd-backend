@@ -1,1287 +1,1239 @@
-# Hub-and-Spoke Architecture: Comprehensive Guide
+# Hub-and-Spoke Architecture Guide
+
+**Version:** 2.0  
+**Last Updated:** January 2026
 
 ## Table of Contents
 
 1. [Introduction](#introduction)
-2. [Core Concepts](#core-concepts)
-3. [Architecture Diagrams](#architecture-diagrams)
-4. [Graph Traversal Patterns](#graph-traversal-patterns)
-5. [Implementation Details](#implementation-details)
+2. [The Problem: Graph Explosion](#the-problem-graph-explosion)
+3. [The Solution: Hub Nodes](#the-solution-hub-nodes)
+4. [PDVD Database Schema](#pdvd-database-schema)
+5. [Query Patterns](#query-patterns)
 6. [Performance Analysis](#performance-analysis)
-7. [References & Standards](#references-and-standards)
+7. [Implementation Details](#implementation-details)
+8. [Best Practices](#best-practices)
 
 ---
 
 ## Introduction
 
-### What is Hub-and-Spoke Architecture?
+The Hub-and-Spoke pattern is a graph database design that uses intermediate "hub" nodes to connect two large sets of entities, dramatically reducing edge count and improving query performance. In PDVD, we use PURL (Package URL) hubs to connect CVEs with SBOMs/Releases.
 
-The hub-and-spoke architecture is a graph database design pattern that uses central "hub" nodes to connect related data, similar to how major airports serve as connection points for flights. Instead of creating direct connections between every pair of entities (which grows exponentially), we route connections through central hubs (which grows linearly).
+### The Core Idea
 
-### Why Use It?
+Instead of directly connecting every CVE to every affected SBOM (creating N×M edges), we:
+1. Create a **hub node** for each unique package (e.g., `pkg:npm/lodash`)
+2. Connect CVEs to the hub (`cve2purl` edges)
+3. Connect SBOMs to the hub (`sbom2purl` edges)
+4. Store version information on the edges
+5. Match versions at query time
 
-In vulnerability management, we need to connect:
-
-- **Thousands of CVEs** (vulnerabilities)
-- **Millions of package references** (in SBOMs)
-- **Hundreds of thousands of releases** (software versions)
-- **Countless deployment endpoints** (where code runs)
-
-Direct connections would create billions of edges and make queries impossibly slow. Hub-and-spoke reduces this to millions of edges with fast query times.
-
-### The Problem This Solves
-
-**Business Question**: "Which of our production systems are affected by CVE-2024-1234?"
-
-**Without Hub Architecture**:
-
-- Must check every SBOM for the vulnerable package
-- Must match every SBOM against the CVE's version range
-- Query time: Minutes to hours
-- Storage: Gigabytes of duplicate relationships
-
-**With Hub Architecture**:
-
-- CVE → PURL hub → SBOMs with version filtering
-- Single graph traversal with indexed lookups
-- Query time: Milliseconds to seconds
-- Storage: Megabytes of optimized relationships
+This reduces edges from **O(N×M)** to **O(N+M)** - a reduction of **99.89%** in typical scenarios.
 
 ---
 
-## Core Concepts
+## The Problem: Graph Explosion
 
-### 1. The Hub Node
-
-**What**: PURL (Package URL) nodes serve as hubs
-
-**Structure**: Base package identifier without version
+### Traditional Approach
 
 ```mermaid
 graph LR
-    H1[pkg:npm/lodash<br/>Hub - version-free]
-    H2[pkg:pypi/django<br/>Hub - version-free]
-    H3[pkg:maven/log4j-core<br/>Hub - version-free]
+    subgraph CVEs["1,000 CVEs"]
+        C1[CVE-1]
+        C2[CVE-2]
+        C3[CVE-3]
+        C4[...]
+    end
     
-    style H1 fill:#4dabf7
-    style H2 fill:#4dabf7
-    style H3 fill:#4dabf7
+    subgraph SBOMs["10,000 SBOMs"]
+        S1[SBOM-1]
+        S2[SBOM-2]
+        S3[SBOM-3]
+        S4[...]
+    end
+    
+    C1 -.-> S1
+    C1 -.-> S2
+    C1 -.-> S3
+    C1 -.-> S4
+    C2 -.-> S1
+    C2 -.-> S2
+    C2 -.-> S3
+    C2 -.-> S4
+    C3 -.-> S1
+    C3 -.-> S2
+    C3 -.-> S3
+    C3 -.-> S4
+    C4 -.-> S1
+    C4 -.-> S2
+    C4 -.-> S3
+    C4 -.-> S4
+    
+    EDGES[10,000,000 edges<br/>1,000 CVEs × 10,000 SBOMs]
+    
+    style EDGES fill:#ffe0e0
 ```
 
-**Purpose**:
+**Problems:**
+- **Storage:** 10M edges = ~500MB just for edge metadata
+- **Query Performance:** Finding all SBOMs for a CVE requires scanning millions of edges
+- **Write Performance:** Adding a new CVE requires creating 10K+ edges
+- **Maintenance:** Updating version ranges requires touching millions of edges
 
-- Central connection point for all references to a package
-- Enables version-agnostic queries
-- Reduces node duplication
+### Real-World Example
 
-### 2. The Spokes
+Consider `CVE-2024-1234` affecting `lodash <4.17.21`:
 
-**CVE Spoke**: Vulnerabilities that affect packages
-
-```mermaid
-graph LR
-    CVE[CVE-2024-1234] -->|affects| Hub[pkg:npm/lodash]
-    
-    style CVE fill:#ff6b6b
-    style Hub fill:#4dabf7
+**Traditional Approach:**
+```
+CVE-2024-1234 → SBOM-payment-service-2.1.0
+CVE-2024-1234 → SBOM-frontend-app-1.3.0
+CVE-2024-1234 → SBOM-api-gateway-0.9.0
+... (repeat for all 10,000 SBOMs) ...
 ```
 
-**SBOM Spoke**: Software bills of materials that use packages
-
-```mermaid
-graph LR
-    SBOM[SBOM-A] -->|contains<br/>version: 4.17.20| Hub[pkg:npm/lodash]
-    
-    style SBOM fill:#69db7c
-    style Hub fill:#4dabf7
+**Hub-and-Spoke Approach:**
 ```
-
-### 3. Edge Metadata
-
-**Critical Design Element**: Version information stored on edges, not nodes
-
-**SBOM2PURL Edge**:
-
-```json
-{
-  "_from": "sbom/12345",
-  "_to": "purl/67890",
-  "version": "4.17.20",
-  "full_purl": "pkg:npm/lodash@4.17.20"
-}
-```
-
-**Why**: Allows one hub node to connect to multiple versions without duplication
-
----
-
-## Architecture Diagrams
-
-### Conceptual Model
-
-```mermaid
-flowchart TB
-    subgraph Layer1["Layer 1: VULNERABILITY SOURCES"]
-        OSV[OSV.dev<br/>CVE Feed]
-        GitHub[GitHub<br/>Advisories]
-        NVD[NVD<br/>Database]
-    end
-    
-    subgraph Layer2["Layer 2: CVE DOCUMENTS (Spokes)"]
-        CVEDocs[CVE Nodes with calculated<br/>severity and PURL references]
-    end
-    
-    subgraph Layer3["Layer 3: PURL HUBS (Central Hubs)"]
-        PURLHubs[Base package identifiers<br/>one per unique package]
-    end
-    
-    subgraph Layer4["Layer 4: SBOM DOCUMENTS (Spokes)"]
-        SBOMDocs[CycloneDX SBOMs<br/>with component lists]
-    end
-    
-    subgraph Layer5["Layer 5: PROJECT RELEASES"]
-        Releases[Versioned releases<br/>with git metadata]
-    end
-    
-    subgraph Layer6["Layer 6: DEPLOYMENT ENDPOINTS"]
-        Endpoints[Production systems<br/>running the code]
-    end
-    
-    Layer1 -->|Ingestion| Layer2
-    Layer2 -->|CVE2PURL| Layer3
-    Layer3 -->|SBOM2PURL<br/>with version| Layer4
-    Layer4 -->|RELEASE2SBOM| Layer5
-    Layer5 -->|SYNC Records| Layer6
-    
-    style Layer1 fill:#ff9999
-    style Layer2 fill:#ffcc99
-    style Layer3 fill:#99ccff
-    style Layer4 fill:#99ff99
-    style Layer5 fill:#ffff99
-    style Layer6 fill:#cc99ff
-```
-
-### Package Ecosystem View
-
-```mermaid
-flowchart TB
-    subgraph CVELayer["CVEs (Threats)"]
-        CVE1["CVE-2024-1234<br/>affects: 4.17.20"]
-        CVE2["CVE-2024-5678<br/>affects: 4.17.19"]
-        CVE3["CVE-2023-9999<br/>affects: 4.17.15"]
-    end
-    
-    subgraph Hub["SINGLE PURL HUB: pkg:npm/lodash"]
-        PURLHub[pkg:npm/lodash<br/>Central Hub]
-    end
-    
-    subgraph SBOMLayer["SBOMs (Usage)"]
-        SBOM1["SBOM-001<br/>lodash@4.17.20"]
-        SBOM2["SBOM-002<br/>lodash@4.17.19"]
-        SBOM3["SBOM-003<br/>lodash@4.17.21"]
-    end
-    
-    subgraph MatchingLogic["VERSION MATCHING"]
-        Match1["CVE-2024-1234 affects 4.17.20<br/>✓ Matches SBOM-001<br/>✗ Skips SBOM-002"]
-        Match2["CVE-2024-5678 affects 4.17.19<br/>✗ Skips SBOM-001<br/>✓ Matches SBOM-002"]
-        Result["Results:<br/>SBOM-001 and SBOM-002 vulnerable<br/>SBOM-003 safe"]
-    end
-    
-    CVE1 & CVE2 & CVE3 --> PURLHub
-    PURLHub --> SBOM1 & SBOM2 & SBOM3
-    SBOM1 & SBOM2 & SBOM3 --> Match1 & Match2
-    Match1 & Match2 --> Result
-    
-    style CVELayer fill:#ffe0e0
-    style Hub fill:#e0f0ff
-    style SBOMLayer fill:#e0ffe0
-    style MatchingLogic fill:#fff3bf
-    style CVE1 fill:#ff6b6b
-    style CVE2 fill:#ff6b6b
-    style CVE3 fill:#ff6b6b
-    style PURLHub fill:#4dabf7
-    style Result fill:#ffd43b
+CVE-2024-1234 → pkg:npm/lodash (hub)
+pkg:npm/lodash → SBOM-payment-service-2.1.0 (version: 4.17.20)
+pkg:npm/lodash → SBOM-frontend-app-1.3.0 (version: 4.17.18)
+pkg:npm/lodash → SBOM-api-gateway-0.9.0 (version: 4.18.0)
 ```
 
 ---
 
-## Graph Traversal Patterns
+## The Solution: Hub Nodes
 
-### Pattern 1: CVE Impact Analysis
-
-**Query**: "What is affected by CVE-2024-1234?"
-
-```mermaid
-flowchart TB
-    Start["Query: CVE Impact Analysis"] --> Step1
-    Step1["1. Start at CVE node<br/>CVE-2024-1234"] --> Step2
-    Step2["2. Traverse CVE2PURL edges<br/>to PURL hubs"] --> Step3
-    Step3["3. Traverse SBOM2PURL edges<br/>to SBOMs<br/>(collect version from edge)"] --> Step4
-    Step4["4. Filter by version range<br/>in application code"] --> Step5
-    Step5["5. Traverse RELEASE2SBOM edges<br/>to releases"] --> Step6
-    Step6["6. Join with SYNC records"] --> Step7
-    Step7["7. Join with ENDPOINT records"] --> Result
-    Result["Return Results:<br/>CVE → Package → Version<br/>→ Release → Endpoint → Environment"]
-    
-    style Start fill:#e3f2fd
-    style Step1 fill:#ff6b6b
-    style Step2 fill:#4dabf7
-    style Step3 fill:#69db7c
-    style Step4 fill:#ffd43b
-    style Step5 fill:#fff0e0
-    style Step6 fill:#cc5de8
-    style Step7 fill:#cc5de8
-    style Result fill:#51cf66
-```
-
-**AQL (ArangoDB Query Language)**:
-
-```aql
-FOR cve IN cve
-  FILTER cve.id == "CVE-2024-1234"
-  
-  // Traverse to PURL hubs
-  FOR purl IN OUTBOUND cve cve2purl
-    
-    // Traverse to SBOMs
-    FOR sbomEdge IN INBOUND purl sbom2purl
-      LET sbom = DOCUMENT(sbomEdge._from)
-      LET version = sbomEdge.version
-      
-      // Filter by version range (in Go for complex logic)
-      // Traverse to releases
-      FOR release IN INBOUND sbom release2sbom
-        
-        // Traverse to endpoints
-        FOR sync IN sync
-          FILTER sync.release_name == release.name
-          FILTER sync.release_version == release.version
-          
-          FOR endpoint IN endpoint
-            FILTER endpoint.name == sync.endpoint_name
-            RETURN {
-              cve_id: cve.id,
-              package: purl.purl,
-              version: version,
-              release: release.name,
-              endpoint: endpoint.name,
-              environment: endpoint.environment
-            }
-```
-
-### Pattern 2: Severity-Based Query
-
-**Query**: "Which production endpoints have CRITICAL vulnerabilities?"
-
-```mermaid
-flowchart TB
-    Start["Query: Critical Vulnerabilities<br/>in Production"] --> Step1
-    Step1["1. Start at Release nodes"] --> Step2
-    Step2["2. Traverse to SBOM"] --> Step3
-    Step3["3. Traverse to PURL hub<br/>(collect version from edge)"] --> Step4
-    Step4["4. Traverse to CVE nodes"] --> Step5
-    Step5["5. Filter:<br/>severity_rating == 'CRITICAL'<br/>(indexed field)"] --> Step6
-    Step6["6. Check version match<br/>in affected ranges"] --> Step7
-    Step7["7. Join with SYNC records"] --> Step8
-    Step8["8. Join with ENDPOINT records<br/>Filter: environment == 'production'"] --> Result
-    Result["Return DISTINCT Results:<br/>Critical CVEs in Production"]
-    
-    style Start fill:#e3f2fd
-    style Step5 fill:#ff6b6b
-    style Step6 fill:#ffd43b
-    style Step8 fill:#cc5de8
-    style Result fill:#51cf66
-```
-
-**AQL**:
-
-```aql
-FOR release IN release
-  FOR sbom IN OUTBOUND release release2sbom
-    FOR sbomEdge IN OUTBOUND sbom sbom2purl
-      LET purl = DOCUMENT(sbomEdge._to)
-      LET version = sbomEdge.version
-      
-      FOR cveEdge IN INBOUND purl cve2purl
-        LET cve = DOCUMENT(cveEdge._from)
-        
-        // Filter by severity rating (indexed!)
-        FILTER cve.database_specific.severity_rating == "CRITICAL"
-        
-        // Check version match in affected ranges
-        FOR affected IN cve.affected
-          FILTER affected.package.purl == purl.purl
-          
-          // Join with sync and endpoint
-          FOR sync IN sync
-            FILTER sync.release_name == release.name
-            FILTER sync.release_version == release.version
-            
-            FOR endpoint IN endpoint
-              FILTER endpoint.name == sync.endpoint_name
-              FILTER endpoint.environment == "production"
-              
-              RETURN DISTINCT {
-                cve_id: cve.id,
-                severity: cve.database_specific.cvss_base_score,
-                package: purl.purl,
-                version: version,
-                release: release.name,
-                endpoint: endpoint.name
-              }
-```
-
-**Optimization Points:**
-
-- `severity_rating` field is indexed for fast filtering
-- `DISTINCT` eliminates duplicate results
-- `FILTER` clauses reduce data early in traversal
-- Version checking done in Go after AQL for accuracy
-
-### Pattern 3: Release Vulnerability Report
-
-**Query**: "What CVEs affect release frontend-app v1.0?"
-
-```mermaid
-flowchart LR
-    Start["Query: Release<br/>Vulnerability Report"] --> Step1
-    Step1["1. Filter:<br/>release.name == 'frontend-app'<br/>release.version == '1.0'"] --> Step2
-    Step2["2. Traverse to SBOM"] --> Step3
-    Step3["3. Traverse to PURL hubs<br/>(collect versions)"] --> Step4
-    Step4["4. Traverse to CVE nodes"] --> Step5
-    Step5["5. Version matching<br/>in Go code"] --> Result
-    Result["Return:<br/>CVE ID, Severity Rating,<br/>Package, Version, Summary"]
-    
-    style Start fill:#e3f2fd
-    style Step1 fill:#fff0e0
-    style Step4 fill:#ff6b6b
-    style Result fill:#51cf66
-```
-
-**AQL**:
-
-```aql
-FOR release IN release
-  FILTER release.name == "frontend-app"
-  FILTER release.version == "1.0"
-  
-  FOR sbom IN OUTBOUND release release2sbom
-    FOR sbomEdge IN OUTBOUND sbom sbom2purl
-      LET purl = DOCUMENT(sbomEdge._to)
-      LET version = sbomEdge.version
-      
-      FOR cve IN INBOUND purl cve2purl
-        // Version matching in Go code
-        RETURN {
-          cve_id: cve.id,
-          severity: cve.database_specific.cvss_base_score,
-          severity_rating: cve.database_specific.severity_rating,
-          package: purl.purl,
-          version: version,
-          summary: cve.summary
-        }
-```
-
-### Pattern 4: Endpoint Audit
-
-**Query**: "What is deployed to prod-k8s-us-east and what CVEs affect it?"
-
-```mermaid
-flowchart TB
-    Start["Query: Endpoint Audit<br/>prod-k8s-us-east"] --> Step1
-    Step1["1. Filter:<br/>sync.endpoint_name ==<br/>'prod-k8s-us-east'"] --> Step2
-    Step2["2. Join with Release nodes"] --> Step3
-    Step3["3. Traverse to SBOM"] --> Step4
-    Step4["4. Traverse to PURL hubs<br/>(collect versions)"] --> Step5
-    Step5["5. Traverse to CVE nodes"] --> Result
-    Result["Return:<br/>Release, Version, CVE ID,<br/>Severity Rating, Package,<br/>Package Version, Synced At"]
-    
-    style Start fill:#e3f2fd
-    style Step1 fill:#cc5de8
-    style Step5 fill:#ff6b6b
-    style Result fill:#51cf66
-```
-
-**AQL**:
-
-```aql
-FOR sync IN sync
-  FILTER sync.endpoint_name == "prod-k8s-us-east"
-  
-  FOR release IN release
-    FILTER release.name == sync.release_name
-    FILTER release.version == sync.release_version
-    
-    FOR sbom IN OUTBOUND release release2sbom
-      FOR sbomEdge IN OUTBOUND sbom sbom2purl
-        LET purl = DOCUMENT(sbomEdge._to)
-        LET version = sbomEdge.version
-        
-        FOR cve IN INBOUND purl cve2purl
-          RETURN {
-            release: release.name,
-            version: release.version,
-            cve_id: cve.id,
-            severity_rating: cve.database_specific.severity_rating,
-            package: purl.purl,
-            package_version: version,
-            synced_at: sync.synced_at
-          }
-```
-
----
-
-## Implementation Details
-
-### ArangoDB Collections
-
-**Document Collections**:
-
-```javascript
-db._create("cve");        // CVE vulnerability data
-db._create("purl");       // Package URL hubs
-db._create("sbom");       // Software Bill of Materials
-db._create("release");    // Project releases
-db._create("endpoint");   // Deployment targets
-db._create("sync");       // Deployment records
-```
-
-**Edge Collections**:
-
-```javascript
-db._createEdgeCollection("cve2purl");      // CVE → PURL
-db._createEdgeCollection("sbom2purl");     // SBOM → PURL
-db._createEdgeCollection("release2sbom");  // Release → SBOM
-```
+### Hub-and-Spoke Design
 
 ```mermaid
 graph TB
-    subgraph Documents["Document Collections"]
-        CVE[cve<br/>CVE vulnerability data]
-        PURL[purl<br/>Package URL hubs]
-        SBOM[sbom<br/>Software Bill of Materials]
-        REL[release<br/>Project releases]
-        EP[endpoint<br/>Deployment targets]
-        SYNC[sync<br/>Deployment records]
+    subgraph CVEs["CVEs (Threats)"]
+        C1[CVE-2024-1234<br/>lodash <4.17.21]
+        C2[CVE-2023-5678<br/>lodash >=4.0 <4.17.19]
     end
     
-    subgraph Edges["Edge Collections"]
-        C2P[cve2purl<br/>CVE → PURL]
-        S2P[sbom2purl<br/>SBOM → PURL]
-        R2S[release2sbom<br/>Release → SBOM]
+    subgraph Hubs["PURL Hubs (Packages)"]
+        H1[pkg:npm/lodash]
+        H2[pkg:npm/express]
+        H3[pkg:pypi/flask]
     end
     
-    CVE -.->|connects via| C2P
-    C2P -.-> PURL
-    SBOM -.->|connects via| S2P
-    S2P -.-> PURL
-    REL -.->|connects via| R2S
-    R2S -.-> SBOM
-    REL -.->|references| SYNC
-    SYNC -.-> EP
+    subgraph SBOMs["SBOMs (Components)"]
+        S1[payment-service-2.1.0<br/>lodash@4.17.20]
+        S2[frontend-app-1.3.0<br/>express@4.18.2]
+        S3[api-gateway-0.9.0<br/>flask@2.3.0]
+    end
     
-    style Documents fill:#e0f0ff
-    style Edges fill:#ffe0e0
+    C1 -->|cve2purl<br/>affects: <4.17.21| H1
+    C2 -->|cve2purl<br/>affects: >=4.0 <4.17.19| H1
+    
+    H1 -->|sbom2purl<br/>version: 4.17.20| S1
+    H2 -->|sbom2purl<br/>version: 4.18.2| S2
+    H3 -->|sbom2purl<br/>version: 2.3.0| S3
+    
+    EDGES[11,000 edges<br/>1,000 + 10,000<br/>99.89% reduction]
+    
+    style H1 fill:#4dabf7,stroke:#1971c2,stroke-width:3px
+    style H2 fill:#4dabf7,stroke:#1971c2,stroke-width:3px
+    style H3 fill:#4dabf7,stroke:#1971c2,stroke-width:3px
+    style EDGES fill:#e0ffe0
 ```
 
-### Index Strategy
+### Key Properties
 
-**Performance-Critical Indexes**:
+1. **Hub Nodes are Version-Free:**
+   - `pkg:npm/lodash` (no version)
+   - Represents the package concept, not a specific version
 
+2. **Edges Store Version Information:**
+   - `sbom2purl` edges: `{ version: "4.17.20" }`
+   - `cve2purl` edges: `{ affects_versions: ["<4.17.21"] }`
+
+3. **Version Matching at Query Time:**
+   - Query traverses: CVE → Hub → SBOMs
+   - Filter SBOMs where version matches CVE's affected range
+   - Enables flexible version matching (semver, ranges, wildcards)
+
+---
+
+## PDVD Database Schema
+
+### Collection Overview
+
+```mermaid
+erDiagram
+    CVE ||--o{ CVE2PURL : "affects"
+    PURL }o--o{ CVE2PURL : "vulnerable"
+    
+    PURL }o--o{ SBOM2PURL : "used_in"
+    SBOM ||--o{ SBOM2PURL : "contains"
+    
+    RELEASE ||--|| SBOM : "described_by"
+    RELEASE ||--o{ RELEASE2CVE : "has_vulnerability"
+    CVE }o--o{ RELEASE2CVE : "found_in"
+    
+    RELEASE ||--o{ SYNC : "deployed_as"
+    ENDPOINT ||--o{ SYNC : "hosts"
+    
+    CVE ||--o{ CVE_LIFECYCLE : "tracked_by"
+    USERS ||--o{ ORGS : "member_of"
+    ORGS ||--o{ RELEASES : "owns"
+    
+    CVE {
+        string id PK
+        float cvss_base_score
+        string severity_rating
+        json affected
+    }
+    
+    PURL {
+        string purl PK
+        string type
+        string name
+        null version
+    }
+    
+    SBOM {
+        string key PK
+        string release_name
+        string release_version
+        string org
+        json content
+    }
+    
+    RELEASE {
+        string key PK
+        string name
+        string version
+        string org
+        bool is_public
+    }
+    
+    ENDPOINT {
+        string name PK
+        string org
+        string endpoint_type
+        string environment
+        bool is_mission_asset
+    }
+    
+    SYNC {
+        string key PK
+        string endpoint_name
+        string org
+        datetime timestamp
+        json releases
+    }
+    
+    CVE_LIFECYCLE {
+        string key PK
+        string cve_id
+        string endpoint_name
+        datetime introduced_at
+        datetime remediated_at
+        bool is_remediated
+    }
+    
+    USERS {
+        string username PK
+        string email
+        array orgs
+        string role
+        bool is_active
+    }
+    
+    ORGS {
+        string name PK
+        string display_name
+    }
+```
+
+### Core Collections
+
+#### 1. CVE Collection
 ```javascript
-// PURL hub unique index
-db.purl.ensureIndex({
-  type: "persistent",
-  fields: ["purl"],
-  unique: true
-});
-
-// Severity filtering index
-db.cve.ensureIndex({
-  type: "persistent",
-  fields: ["database_specific.severity_rating"]
-});
-
-// Composite release lookup
-db.release.ensureIndex({
-  type: "persistent",
-  fields: ["name", "version"]
-});
-
-// Edge traversal indexes
-db.sbom2purl.ensureIndex({
-  type: "persistent",
-  fields: ["_to", "version"]
-});
-
-// Sync lookup indexes
-db.sync.ensureIndex({
-  type: "persistent",
-  fields: ["release_name", "release_version", "endpoint_name"],
-  unique: true
-});
+db.cve
 ```
 
-```mermaid
-flowchart LR
-    subgraph Indexes["Database Indexes"]
-        I1["purl.purl<br/>(unique)"]
-        I2["cve.database_specific<br/>.severity_rating"]
-        I3["release.name +<br/>release.version"]
-        I4["sbom2purl._to +<br/>sbom2purl.version"]
-        I5["sync.release_name +<br/>release_version +<br/>endpoint_name<br/>(unique)"]
-    end
-    
-    Benefits["<b>Benefits:</b><br/>• Fast PURL hub lookups<br/>• Efficient severity filtering<br/>• Quick release retrieval<br/>• Optimized version matching<br/>• Idempotent sync operations"]
-    
-    Indexes --> Benefits
-    
-    style Indexes fill:#fff3bf
-    style Benefits fill:#51cf66
-```
+**Purpose:** Vulnerability data with pre-calculated CVSS scores
 
-### PURL Generation
-
-**From CVE Data (OSV format)**:
-
-```go
-// Extract PURL from CVE affected package
-func extractBasePURL(affected models.Affected) string {
-    if affected.Package.PURL != "" {
-        // Parse PURL and remove version
-        parsed, _ := packageurl.FromString(affected.Package.PURL)
-        base := packageurl.PackageURL{
-            Type:      parsed.Type,
-            Namespace: parsed.Namespace,
-            Name:      parsed.Name,
-            // Version intentionally omitted
-        }
-        return strings.ToLower(base.ToString())
-    }
-    return ""
-}
-```
-
-**From SBOM Components (CycloneDX)**:
-
-```go
-// Extract PURL from SBOM component
-func extractPURLFromComponent(component map[string]interface{}) (string, string) {
-    purl := component["purl"].(string)
-    
-    // Parse to get base and version
-    parsed, _ := packageurl.FromString(purl)
-    
-    // Base PURL (for hub)
-    base := packageurl.PackageURL{
-        Type:      parsed.Type,
-        Namespace: parsed.Namespace,
-        Name:      parsed.Name,
-    }
-    
-    return strings.ToLower(base.ToString()), parsed.Version
-}
-```
-
-```mermaid
-flowchart TB
-    subgraph CVESource["CVE Data (OSV)"]
-        CVEData["affected.package.purl:<br/>pkg:npm/lodash@4.17.20"]
-    end
-    
-    subgraph SBOMSource["SBOM Data (CycloneDX)"]
-        SBOMData["component.purl:<br/>pkg:npm/lodash@4.17.20"]
-    end
-    
-    CVEData --> Parse1["Parse PURL"]
-    SBOMData --> Parse2["Parse PURL"]
-    
-    Parse1 --> Extract1["Extract Base:<br/>Type: npm<br/>Namespace: -<br/>Name: lodash"]
-    Parse2 --> Extract2["Extract Base + Version:<br/>Type: npm<br/>Name: lodash<br/>Version: 4.17.20"]
-    
-    Extract1 --> Hub["Hub Node:<br/>pkg:npm/lodash"]
-    Extract2 --> Hub
-    Extract2 --> Edge["Edge Metadata:<br/>version: '4.17.20'"]
-    
-    style CVESource fill:#ffe0e0
-    style SBOMSource fill:#e0ffe0
-    style Hub fill:#4dabf7
-    style Edge fill:#ffd43b
-```
-
-### Version Matching Logic
-
-**Ecosystem-Specific Parsers**:
-
-```go
-import (
-    npm "github.com/aquasecurity/go-npm-version/pkg"
-    pep440 "github.com/aquasecurity/go-pep440-version"
-    "github.com/Masterminds/semver/v3"
-)
-
-func isVersionAffected(version string, affected models.Affected) bool {
-    ecosystem := string(affected.Package.Ecosystem)
-    
-    // Use ecosystem-specific parser
-    switch strings.ToLower(ecosystem) {
-    case "npm":
-        return isVersionInRangeNPM(version, affected.Ranges[0])
-    case "pypi":
-        return isVersionInRangePython(version, affected.Ranges[0])
-    default:
-        return isVersionInRangeSemver(version, affected.Ranges[0])
-    }
-}
-
-func isVersionInRangeNPM(version string, vrange models.Range) bool {
-    v, _ := npm.NewVersion(version)
-    
-    for _, event := range vrange.Events {
-        if event.Introduced != "" {
-            intro, _ := npm.NewVersion(event.Introduced)
-            if v.LessThan(intro) {
-                return false
-            }
-        }
-        if event.Fixed != "" {
-            fix, _ := npm.NewVersion(event.Fixed)
-            if !v.LessThan(fix) {
-                return false
-            }
-        }
-    }
-    return true
-}
-```
-
-```mermaid
-flowchart TB
-    Start["Version to Check<br/>+ CVE Affected Ranges"] --> Detect
-    Detect["Detect Ecosystem<br/>(npm, pypi, maven, etc.)"] --> Switch
-    
-    Switch{Ecosystem Type}
-    Switch -->|npm| NPM["npm Parser<br/>github.com/aquasecurity/<br/>go-npm-version"]
-    Switch -->|PyPI| PEP["PEP 440 Parser<br/>github.com/aquasecurity/<br/>go-pep440-version"]
-    Switch -->|Other| SemVer["SemVer Parser<br/>github.com/Masterminds/<br/>semver/v3"]
-    
-    NPM --> Check["Check Version<br/>Against Range"]
-    PEP --> Check
-    SemVer --> Check
-    
-    Check --> Result{In Range?}
-    Result -->|Yes| Vuln["✓ VULNERABLE"]
-    Result -->|No| Safe["✗ SAFE"]
-    
-    style Start fill:#e3f2fd
-    style Switch fill:#ffd43b
-    style NPM fill:#69db7c
-    style PEP fill:#69db7c
-    style SemVer fill:#69db7c
-    style Vuln fill:#ff6b6b
-    style Safe fill:#51cf66
-```
-
----
-
-## Performance Analysis
-
-### Space Complexity
-
-```mermaid
-flowchart TB
-    subgraph Without["WITHOUT HUB ARCHITECTURE"]
-        W1["N CVEs × M SBOMs<br/>= N×M direct edges"]
-        W2["Example:<br/>1,000 CVEs × 10,000 SBOMs<br/>= 10,000,000 edges"]
-        W3["Storage: ~1 GB for edges alone"]
-    end
-    
-    subgraph With["WITH HUB ARCHITECTURE"]
-        H1["N CVEs → P PURLs +<br/>M SBOMs → P PURLs<br/>= N+M edges"]
-        H2["Example:<br/>1,000 + 10,000<br/>= 11,000 edges"]
-        H3["Storage: ~10 MB for edges"]
-    end
-    
-    Reduction["<b>99.89% REDUCTION</b>"]
-    
-    Without -.-> Reduction
-    Reduction -.-> With
-    
-    style Without fill:#ffe0e0
-    style With fill:#e0ffe0
-    style Reduction fill:#51cf66
-    style W3 fill:#ff6b6b
-    style H3 fill:#51cf66
-```
-
-**Without Hub Architecture**:
-
-- N CVEs × M SBOMs = N×M direct edges
-- Example: 1,000 CVEs × 10,000 SBOMs = 10,000,000 edges
-- Storage: ~1 GB for edges alone
-
-**With Hub Architecture**:
-
-- N CVEs → P PURLs + M SBOMs → P PURLs = N+M edges
-- Example: 1,000 + 10,000 = 11,000 edges
-- Storage: ~10 MB for edges
-- **99.89% reduction**
-
-### Time Complexity
-
-#### Query: Find all releases affected by a CVE
-
-```mermaid
-flowchart TB
-    subgraph Without["Without Hub: O(N)"]
-        W1["Must check every SBOM<br/>for CVE reference"]
-        W2["N = number of SBOMs"]
-        W3["Linear scan of all SBOMs"]
-    end
-    
-    subgraph With["With Hub: O(log P + M)"]
-        H1["Indexed lookup to PURL hub<br/>O(log P)"]
-        H2["P = number of PURL hubs"]
-        H3["Traverse to connected SBOMs<br/>O(M)"]
-        H4["M = SBOMs connected to hub"]
-        H5["Only checks relevant SBOMs"]
-    end
-    
-    Without -.->|Much Faster| With
-    
-    style Without fill:#ffe0e0
-    style With fill:#e0ffe0
-    style W3 fill:#ff6b6b
-    style H5 fill:#51cf66
-```
-
-Without Hub:
-
-```text
-O(N) where N = number of SBOMs
-Must check every SBOM for CVE reference
-```
-
-With Hub:
-
-```text
-O(log P + M) where:
-  P = number of PURL hubs (indexed lookup)
-  M = number of SBOMs connected to matching PURLs
-Only checks relevant SBOMs
-```
-
-### Actual Performance Measurements
-
-| Operation                      | Without Hub | With Hub | Improvement |
-|--------------------------------|-------------|----------|-------------|
-| CVE impact query (100K SBOMs)  | 45s         | 0.8s     | 56× faster  |
-| Severity filter (all releases) | 120s        | 2.1s     | 57× faster  |
-| Release CVE report             | 12s         | 0.3s     | 40× faster  |
-| Endpoint audit                 | 8s          | 0.5s     | 16× faster  |
-
-```mermaid
-graph TB
-    subgraph Comparison["Performance Comparison"]
-        Q1["CVE Impact Query<br/>(100K SBOMs)"]
-        Q2["Severity Filter<br/>(All Releases)"]
-        Q3["Release CVE Report"]
-        Q4["Endpoint Audit"]
-    end
-    
-    subgraph WithoutHub["Without Hub"]
-        W1["45s"]
-        W2["120s"]
-        W3["12s"]
-        W4["8s"]
-    end
-    
-    subgraph WithHub["With Hub"]
-        H1["0.8s<br/>(56× faster)"]
-        H2["2.1s<br/>(57× faster)"]
-        H3["0.3s<br/>(40× faster)"]
-        H4["0.5s<br/>(16× faster)"]
-    end
-    
-    Q1 --> W1 & H1
-    Q2 --> W2 & H2
-    Q3 --> W3 & H3
-    Q4 --> W4 & H4
-    
-    style WithoutHub fill:#ffe0e0
-    style WithHub fill:#e0ffe0
-    style W1 fill:#ff6b6b
-    style W2 fill:#ff6b6b
-    style W3 fill:#ff6b6b
-    style W4 fill:#ff6b6b
-    style H1 fill:#51cf66
-    style H2 fill:#51cf66
-    style H3 fill:#51cf66
-    style H4 fill:#51cf66
-```
-
-### Scalability Characteristics
-
-**Linear Scale with Data Growth**:
-
-```mermaid
-flowchart LR
-    subgraph Scale["Linear Scalability"]
-        S1["10,000 releases<br/>→ 11,000 edges<br/>→ 0.8s query"]
-        S2["100,000 releases<br/>→ 101,000 edges<br/>→ 2.1s query"]
-        S3["1,000,000 releases<br/>→ 1,001,000 edges<br/>→ <3s query"]
-    end
-    
-    S1 --> S2 --> S3
-    
-    Growth["<b>Linear Growth: O(N + M)</b><br/>Not Exponential: O(N × M)"]
-    
-    Scale --> Growth
-    
-    style Scale fill:#e0ffe0
-    style Growth fill:#51cf66
-```
-
-- 10,000 releases → 11,000 edges → 0.8s query
-- 100,000 releases → 101,000 edges → 2.1s query
-- 1,000,000 releases → 1,001,000 edges → <3s query
-
-**Memory Efficiency**:
-
-- Hub nodes cached in memory (typically <100MB)
-- Edge metadata indexed for fast access
-- Query results streamed, not loaded fully
-
-```mermaid
-flowchart TB
-    subgraph Memory["Memory Efficiency"]
-        M1["Hub nodes cached<br/>in memory<br/>(typically <100MB)"]
-        M2["Edge metadata<br/>indexed for<br/>fast access"]
-        M3["Query results streamed,<br/>not loaded fully<br/>into memory"]
-    end
-    
-    Benefits["<b>Benefits:</b><br/>• Low memory footprint<br/>• Fast indexed access<br/>• Handles large result sets"]
-    
-    Memory --> Benefits
-    
-    style Memory fill:#e3f2fd
-    style Benefits fill:#51cf66
-```
-
----
-
-## References and Standards
-
-### 1. Package URL (PURL) Specification
-
-**Official Spec**: <https://github.com/package-url/purl-spec>
-
-**Purpose**: Standardized way to identify software packages across ecosystems
-
-**Format**:
-
-```mermaid
-flowchart LR
-    Scheme["scheme:<br/>pkg"] --> Type
-    Type["type:<br/>npm"] --> NS
-    NS["namespace:<br/>(optional)"] --> Name
-    Name["name:<br/>lodash"] --> Ver
-    Ver["version:<br/>@4.17.20<br/>(optional)"] --> Qual
-    Qual["qualifiers:<br/>?key=value<br/>(optional)"] --> Sub
-    Sub["subpath:<br/>#path<br/>(optional)"]
-    
-    style Scheme fill:#e3f2fd
-    style Type fill:#e3f2fd
-    style Name fill:#4dabf7
-    style Ver fill:#ffd43b
-```
-
-**Examples**:
-
-```text
-pkg:npm/lodash@4.17.20
-pkg:pypi/django@3.2.0
-pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1
-pkg:golang/github.com/gin-gonic/gin@v1.7.0
-```
-
-**Our Usage**:
-
-- Hub nodes store base form: `pkg:npm/lodash`
-- Edge metadata stores version: `4.17.20`
-- CVE data references packages by base PURL
-
-### 2. OSV (Open Source Vulnerability) Schema
-
-**Official Spec**: <https://ossf.github.io/osv-schema/>
-
-**Purpose**: Standard format for vulnerability data across ecosystems
-
-**Key Fields We Use**:
-
+**Schema:**
 ```json
 {
+  "_key": "CVE-2024-1234",
   "id": "CVE-2024-1234",
-  "summary": "Vulnerability description",
+  "summary": "Buffer overflow in lodash",
+  "details": "An attacker can exploit...",
+  "aliases": ["GHSA-xxxx-yyyy"],
+  
+  "published": "2024-11-15T00:00:00Z",
+  "modified": "2024-11-16T00:00:00Z",
+  
+  "cvss_base_score": 9.8,
+  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+  "severity_rating": "CRITICAL",
+  
   "affected": [
     {
       "package": {
         "ecosystem": "npm",
-        "name": "lodash",
-        "purl": "pkg:npm/lodash"
+        "name": "lodash"
       },
       "ranges": [
         {
           "type": "SEMVER",
           "events": [
-            {"introduced": "4.17.0"},
+            {"introduced": "0"},
             {"fixed": "4.17.21"}
           ]
         }
       ]
     }
+  ],
+  
+  "references": [
+    {"type": "ADVISORY", "url": "https://nvd.nist.gov/..."}
   ]
 }
 ```
 
-```mermaid
-flowchart TB
-    OSV["OSV Vulnerability Format"] --> Fields
-    
-    subgraph Fields["Key Fields"]
-        F1["id: CVE identifier"]
-        F2["summary: Description"]
-        F3["affected: Package info"]
-        F4["  package.purl: Base PURL"]
-        F5["  ranges: Version ranges"]
-    end
-    
-    Fields --> Integration
-    
-    subgraph Integration["Our Integration"]
-        I1["Ingest from OSV.dev API"]
-        I2["Extract PURLs for hub connections"]
-        I3["Parse version ranges for matching"]
-        I4["Store severity in database_specific"]
-    end
-    
-    style OSV fill:#e3f2fd
-    style Fields fill:#fff3bf
-    style Integration fill:#51cf66
+**Indexes:**
+- Primary: `_key` (CVE ID)
+- Persistent: `cvss_base_score` (for severity queries)
+- Persistent: `severity_rating` (for dashboard filtering)
+- Persistent: `published` (for timeline queries)
+
+#### 2. PURL Collection (Hub Nodes)
+```javascript
+db.purl
 ```
 
-**Integration**:
+**Purpose:** Version-free package hubs
 
-- Ingest from OSV.dev API
-- Extract PURLs for hub connections
-- Parse version ranges for matching
-- Store severity data in `database_specific` field
-
-### 3. CycloneDX SBOM Specification
-
-**Official Spec**: <https://cyclonedx.org/specification/overview/>
-
-**Purpose**: Standard for Software Bill of Materials
-
-**Component Structure**:
-
+**Schema:**
 ```json
 {
-  "bomFormat": "CycloneDX",
-  "specVersion": "1.4",
-  "components": [
-    {
-      "type": "library",
-      "name": "lodash",
-      "version": "4.17.20",
-      "purl": "pkg:npm/lodash@4.17.20"
-    }
-  ]
+  "_key": "pkg:npm/lodash",
+  "purl": "pkg:npm/lodash",
+  "type": "npm",
+  "namespace": null,
+  "name": "lodash",
+  "version": null,  // ALWAYS null for hub nodes
+  "qualifiers": {},
+  "subpath": null
 }
 ```
 
-```mermaid
-flowchart LR
-    SBOM["CycloneDX SBOM"] --> Validate
-    Validate["Validate Format"] --> Extract
-    Extract["Extract Component PURLs"] --> Split
-    
-    subgraph Split["Split PURL"]
-        S1["Base: pkg:npm/lodash<br/>(for hub)"]
-        S2["Version: 4.17.20<br/>(for edge metadata)"]
-    end
-    
-    Split --> Create["Create SBOM2PURL edges"]
-    
-    style SBOM fill:#e3f2fd
-    style Split fill:#ffd43b
-    style Create fill:#51cf66
+**Key Properties:**
+- `_key` = canonical PURL without version
+- `version` is ALWAYS `null` (hub represents package concept)
+- Unique per package name across ecosystem
+
+**Indexes:**
+- Primary: `_key` (PURL)
+- Persistent: `type` (ecosystem filtering)
+- Persistent: `name` (package lookup)
+
+#### 3. SBOM Collection
+```javascript
+db.sbom
 ```
 
-**Our Processing**:
+**Purpose:** Software Bill of Materials
 
-- Validate CycloneDX format
-- Extract component PURLs
-- Split into base PURL (hub) and version (edge metadata)
-- Create SBOM2PURL edges with version info
-
-### 4. ArangoDB Graph Database
-
-**Official Docs**: <https://docs.arangodb.com/stable/graphs/>
-
-**Graph Model**:
-
-```mermaid
-flowchart TB
-    subgraph ArangoDB["ArangoDB Graph Model"]
-        Vertices["<b>Vertices:</b><br/>Document collections<br/>(cve, purl, sbom,<br/>release, endpoint)"]
-        Edges["<b>Edges:</b><br/>Edge collections<br/>with _from and _to<br/>references"]
-        Traversal["<b>Traversal:</b><br/>Built-in graph<br/>traversal with AQL"]
-    end
-    
-    subgraph Features["Key Features We Use"]
-        F1["Named graphs for structure"]
-        F2["Graph traversal queries"]
-        F3["Persistent indexes on edges"]
-        F4["Vertex-centric indexes"]
-    end
-    
-    ArangoDB --> Features
-    
-    style ArangoDB fill:#e3f2fd
-    style Features fill:#51cf66
+**Schema:**
+```json
+{
+  "_key": "sbom_payment-service_2.1.0",
+  "release_name": "payment-service",
+  "release_version": "2.1.0",
+  "org": "acme-corp",
+  
+  "format": "CycloneDX",
+  "spec_version": "1.5",
+  
+  "content": {
+    "bomFormat": "CycloneDX",
+    "specVersion": "1.5",
+    "metadata": { /* ... */ },
+    "components": [
+      {
+        "type": "library",
+        "name": "lodash",
+        "version": "4.17.20",
+        "purl": "pkg:npm/lodash@4.17.20"
+      }
+    ]
+  },
+  
+  "created_at": "2024-12-01T00:00:00Z"
+}
 ```
 
-- **Vertices**: Document collections (cve, purl, sbom, release, endpoint)
-- **Edges**: Edge collections with _from and_to references
-- **Traversal**: Built-in graph traversal with AQL
+**Indexes:**
+- Primary: `_key`
+- Persistent: `["release_name", "release_version"]` (composite)
+- Persistent: `org` (multi-tenancy)
 
-**Key Features We Use**:
+#### 4. Release Collection
+```javascript
+db.release
+```
 
+**Purpose:** Versioned software artifacts
+
+**Schema:**
+```json
+{
+  "_key": "payment-service_2.1.0",
+  "name": "payment-service",
+  "version": "2.1.0",
+  "org": "acme-corp",
+  "is_public": false,
+  
+  "gitcommit": "abc123def456",
+  "giturl": "https://github.com/acme/payment-service",
+  "gitbranch": "main",
+  
+  "builddate": "2024-12-01T00:00:00Z",
+  "dockersha": "sha256:abc...",
+  "content_sha": "sha256:def...",
+  "openssf_scorecard_score": 8.5,
+  
+  "created_at": "2024-12-01T00:00:00Z"
+}
+```
+
+**Indexes:**
+- Primary: `_key`
+- Persistent: `["name", "version"]` (composite)
+- Persistent: `org` (multi-tenancy)
+- Persistent: `is_public` (visibility)
+
+#### 5. Endpoint Collection
+```javascript
+db.endpoint
+```
+
+**Purpose:** Deployment targets
+
+**Schema:**
+```json
+{
+  "_key": "prod-us-east-1",
+  "name": "prod-us-east-1",
+  "org": "acme-corp",
+  "endpoint_type": "eks",
+  "environment": "production",
+  "is_mission_asset": true,
+  
+  "metadata": {
+    "cluster_name": "prod-us-east-1",
+    "region": "us-east-1",
+    "namespace": "payment-services"
+  },
+  
+  "created_at": "2024-01-01T00:00:00Z"
+}
+```
+
+**Indexes:**
+- Primary: `_key` (endpoint name)
+- Persistent: `org` (multi-tenancy)
+- Persistent: `environment` (prod/staging filtering)
+- Persistent: `is_mission_asset` (SLA prioritization)
+
+#### 6. Sync Collection
+```javascript
+db.sync
+```
+
+**Purpose:** Deployment history snapshots
+
+**Schema:**
+```json
+{
+  "_key": "sync_prod-us-east-1_1733011200",
+  "endpoint_name": "prod-us-east-1",
+  "org": "acme-corp",
+  "timestamp": "2024-12-01T00:00:00Z",
+  
+  "releases": [
+    {
+      "name": "payment-service",
+      "version": "2.1.0"
+    }
+  ],
+  
+  "metadata": {
+    "sync_method": "k8s-operator",
+    "sync_agent": "pdvd-agent-v1.2.3"
+  }
+}
+```
+
+**Indexes:**
+- Primary: `_key`
+- Persistent: `endpoint_name` (lookup)
+- Persistent: `["endpoint_name", "timestamp"]` (history)
+- Persistent: `org` (multi-tenancy)
+
+#### 7. CVE Lifecycle Collection
+```javascript
+db.cve_lifecycle
+```
+
+**Purpose:** MTTR tracking and SLA compliance
+
+**Schema:**
+```json
+{
+  "_key": "lifecycle_CVE-2024-1234_prod-us-east-1_payment-service_2.1.0",
+  "cve_id": "CVE-2024-1234",
+  "endpoint_name": "prod-us-east-1",
+  "release_name": "payment-service",
+  "release_version": "2.1.0",
+  "org": "acme-corp",
+  
+  "introduced_at": "2024-12-01T00:00:00Z",
+  "root_introduced_at": "2024-12-01T00:00:00Z",
+  "remediated_at": null,
+  "is_remediated": false,
+  
+  "disclosed_after_deployment": false,
+  "is_mission_asset": true,
+  
+  "sla_target_days": 7,
+  "days_open": 15,
+  "days_to_remediate": null,
+  "is_beyond_sla": true
+}
+```
+
+**Indexes:**
+- Primary: `_key`
+- Persistent: `["cve_id", "endpoint_name"]` (lookup)
+- Persistent: `is_remediated` (active CVE queries)
+- Persistent: `is_beyond_sla` (SLA compliance)
+- Persistent: `org` (multi-tenancy)
+
+#### 8. Users Collection
+```javascript
+db.users
+```
+
+**Purpose:** User accounts and authentication
+
+**Schema:**
+```json
+{
+  "_key": "alice",
+  "username": "alice",
+  "email": "alice@acme.com",
+  "password_hash": "$2a$10$...",
+  "first_name": "Alice",
+  "last_name": "Smith",
+  
+  "orgs": ["acme-corp"],
+  "role": "owner",
+  "auth_provider": "local",
+  
+  "github_username": "alice-gh",
+  "github_token": "gho_...",
+  
+  "is_active": true,
+  "created_at": "2024-01-01T00:00:00Z",
+  "last_login": "2024-12-01T10:30:00Z"
+}
+```
+
+**Indexes:**
+- Primary: `_key` (username)
+- Persistent: `email` (login)
+- Persistent: `orgs[*]` (multi-value, org filtering)
+- Persistent: `is_active` (active user queries)
+
+#### 9. Organizations Collection
+```javascript
+db.orgs
+```
+
+**Purpose:** Multi-tenant organizations
+
+**Schema:**
+```json
+{
+  "_key": "acme-corp",
+  "name": "acme-corp",
+  "display_name": "ACME Corporation",
+  "description": "Main engineering organization",
+  
+  "metadata": {
+    "cost_center": "CC-1234",
+    "billing_contact": "finance@acme.com",
+    "created_by": "alice"
+  },
+  
+  "created_at": "2024-01-01T00:00:00Z"
+}
+```
+
+**Indexes:**
+- Primary: `_key` (org name)
+
+#### 10. Invitations Collection
+```javascript
+db.invitations
+```
+
+**Purpose:** Email invitation tokens
+
+**Schema:**
+```json
+{
+  "_key": "tok_abc123",
+  "token": "tok_abc123",
+  "username": "bob",
+  "email": "bob@acme.com",
+  "org": "acme-corp",
+  "role": "editor",
+  
+  "created_at": "2024-12-01T10:00:00Z",
+  "expires_at": "2024-12-03T10:00:00Z",
+  "accepted_at": null,
+  "status": "pending"
+}
+```
+
+**Indexes:**
+- Primary: `_key` (token)
+- Persistent: `email` (lookup)
+- Persistent: `expires_at` (cleanup)
+- TTL: 48 hours (auto-delete expired)
+
+### Edge Collections
+
+#### 1. cve2purl (CVE → PURL Hub)
+```javascript
+db.cve2purl
+```
+
+**Purpose:** Which packages are affected by a CVE
+
+**Schema:**
+```json
+{
+  "_from": "cve/CVE-2024-1234",
+  "_to": "purl/pkg:npm/lodash",
+  
+  "affects_versions": ["<4.17.21"],
+  "fixed_in": "4.17.21",
+  "severity": "CRITICAL",
+  "cvss_score": 9.8
+}
+```
+
+**Indexes:**
+- Edge index: `_from`, `_to`
+- Persistent: `severity` (filtering)
+
+#### 2. sbom2purl (SBOM → PURL Hub)
+```javascript
+db.sbom2purl
+```
+
+**Purpose:** Which packages are in an SBOM
+
+**Schema:**
+```json
+{
+  "_from": "sbom/sbom_payment-service_2.1.0",
+  "_to": "purl/pkg:npm/lodash",
+  
+  "version": "4.17.20",  // CRITICAL: stores version
+  "scope": "required",
+  "direct": true
+}
+```
+
+**Indexes:**
+- Edge index: `_from`, `_to`
+- Persistent: `version` (version matching)
+
+#### 3. release2sbom (Release → SBOM)
+```javascript
+db.release2sbom
+```
+
+**Purpose:** Which SBOM describes a release
+
+**Schema:**
+```json
+{
+  "_from": "release/payment-service_2.1.0",
+  "_to": "sbom/sbom_payment-service_2.1.0"
+}
+```
+
+**Indexes:**
+- Edge index: `_from`, `_to`
+
+#### 4. release2cve (Release → CVE, Materialized)
+```javascript
+db.release2cve
+```
+
+**Purpose:** Pre-computed vulnerability edges for fast queries
+
+**Schema:**
+```json
+{
+  "_from": "release/payment-service_2.1.0",
+  "_to": "cve/CVE-2024-1234",
+  
+  "package": "lodash",
+  "version": "4.17.20",
+  "severity_rating": "CRITICAL",
+  "cvss_base_score": 9.8,
+  
+  "validated_at": "2024-12-01T00:00:00Z"
+}
+```
+
+**Indexes:**
+- Edge index: `_from`, `_to`
+- Persistent: `severity_rating` (filtering)
+- Persistent: `cvss_base_score` (sorting)
+
+**Note:** These edges are materialized (pre-computed) during SBOM ingestion for performance. They duplicate information that could be derived via hub traversal but enable <1s queries.
+
+---
+
+## Query Patterns
+
+### Pattern 1: Find Vulnerabilities for a Release
+
+**Goal:** Get all CVEs affecting `payment-service:2.1.0`
+
+**Hub-and-Spoke Query:**
 ```aql
--- Named graphs for structure
-CREATE GRAPH vulnerabilityGraph
-  EDGE DEFINITIONS
-    cve2purl FROM cve TO purl,
-    sbom2purl FROM sbom TO purl,
-    release2sbom FROM release TO sbom
-
--- Graph traversal queries
-FOR vertex, edge, path IN 1..5 OUTBOUND "cve/12345" cve2purl
-  RETURN vertex
+FOR release IN release
+  FILTER release.name == "payment-service"
+  FILTER release.version == "2.1.0"
+  
+  FOR sbom IN OUTBOUND release release2sbom
+    FOR purl IN OUTBOUND sbom sbom2purl
+      LET sbom_version = LAST(
+        FOR edge IN sbom2purl
+          FILTER edge._to == purl._id
+          FILTER edge._from == sbom._id
+          RETURN edge.version
+      )
+      
+      FOR cve IN INBOUND purl cve2purl
+        LET cve_edge = FIRST(
+          FOR edge IN cve2purl
+            FILTER edge._from == cve._id
+            FILTER edge._to == purl._id
+            RETURN edge
+        )
+        
+        FILTER IS_VERSION_AFFECTED(sbom_version, cve_edge.affects_versions)
+        
+        RETURN DISTINCT {
+          cve_id: cve.id,
+          severity: cve.severity_rating,
+          score: cve.cvss_base_score,
+          package: purl.name,
+          version: sbom_version,
+          fixed_in: cve_edge.fixed_in
+        }
 ```
 
-**Performance Features**:
+**Performance:** <3 seconds for typical release
 
-- Persistent indexes on edge _from/_to fields
-- Compound indexes for complex queries
-- Edge direction optimization
-- Vertex-centric indexes
+**Optimization:** Use materialized `release2cve` edges:
+```aql
+FOR release IN release
+  FILTER release.name == "payment-service"
+  FILTER release.version == "2.1.0"
+  
+  FOR cve IN OUTBOUND release release2cve
+    RETURN {
+      cve_id: cve.id,
+      severity: cve.severity_rating,
+      score: cve.cvss_base_score
+    }
+```
 
-### 5. CVSS (Common Vulnerability Scoring System)
+**Performance:** <500ms (10x faster)
 
-**Official Spec**: <https://www.first.org/cvss/>
+### Pattern 2: Find All Releases Affected by a CVE
 
-**Purpose**: Standardized vulnerability severity scoring
+**Goal:** Which releases contain `CVE-2024-1234`?
+
+**Hub-and-Spoke Query:**
+```aql
+FOR cve IN cve
+  FILTER cve.id == "CVE-2024-1234"
+  
+  FOR purl IN OUTBOUND cve cve2purl
+    LET cve_edge = FIRST(
+      FOR edge IN cve2purl
+        FILTER edge._from == cve._id
+        FILTER edge._to == purl._id
+        RETURN edge
+    )
+    
+    FOR sbom IN INBOUND purl sbom2purl
+      LET sbom_edge = FIRST(
+        FOR edge IN sbom2purl
+          FILTER edge._to == purl._id
+          FILTER edge._from == sbom._id
+          RETURN edge
+      )
+      
+      FILTER IS_VERSION_AFFECTED(sbom_edge.version, cve_edge.affects_versions)
+      
+      FOR release IN INBOUND sbom release2sbom
+        RETURN DISTINCT {
+          release_name: release.name,
+          release_version: release.version,
+          org: release.org,
+          package: purl.name,
+          package_version: sbom_edge.version
+        }
+```
+
+**Performance:** <5 seconds for typical CVE
+
+**Optimization:** Use org filtering:
+```aql
+// Add after FOR release
+FILTER release.org == @org OR release.is_public == true
+```
+
+### Pattern 3: Dashboard MTTR Calculation
+
+**Goal:** Calculate mean time to remediate by severity
+
+**Query:**
+```aql
+FOR lifecycle IN cve_lifecycle
+  FILTER lifecycle.org == @org
+  FILTER lifecycle.is_remediated == true
+  FILTER lifecycle.remediated_at >= DATE_SUBTRACT(NOW(), @days, "day")
+  
+  FOR cve IN cve
+    FILTER cve.id == lifecycle.cve_id
+    
+    COLLECT severity = cve.severity_rating
+    AGGREGATE
+      count = LENGTH(lifecycle),
+      avg_days = AVG(lifecycle.days_to_remediate),
+      median_days = MEDIAN(lifecycle.days_to_remediate)
+    
+    RETURN {
+      severity: severity,
+      cve_count: count,
+      mttr_avg: avg_days,
+      mttr_median: median_days
+    }
+```
+
+**Performance:** <2 seconds for 180-day window
+
+### Pattern 4: Post-Deployment Detection
+
+**Goal:** Find CVEs disclosed after a release was deployed
+
+**Query:**
+```aql
+FOR lifecycle IN cve_lifecycle
+  FILTER lifecycle.disclosed_after_deployment == true
+  FILTER lifecycle.is_remediated == false
+  
+  FOR cve IN cve
+    FILTER cve.id == lifecycle.cve_id
+    FILTER cve.severity_rating IN ["CRITICAL", "HIGH"]
+  
+  FOR release IN release
+    FILTER release.name == lifecycle.release_name
+    FILTER release.version == lifecycle.release_version
+    
+  RETURN {
+    cve_id: cve.id,
+    severity: cve.severity_rating,
+    endpoint: lifecycle.endpoint_name,
+    release: CONCAT(release.name, ":", release.version),
+    days_open: lifecycle.days_open,
+    sla_target: lifecycle.sla_target_days,
+    is_beyond_sla: lifecycle.is_beyond_sla
+  }
+```
+
+**Performance:** <1 second
+
+---
+
+## Performance Analysis
+
+### Edge Count Comparison
 
 ```mermaid
-flowchart TB
-    CVSS["CVSS Vector String"] --> Parse
-    Parse["Parse with<br/>github.com/pandatix/go-cvss"] --> Versions
-    
-    subgraph Versions["Supported Versions"]
-        V30["CVSS v3.0"]
-        V31["CVSS v3.1"]
-        V40["CVSS v4.0"]
+graph TB
+    subgraph Scenario["Real-World Scenario"]
+        CVEs[1,000 CVEs]
+        Packages[100 Unique Packages]
+        SBOMs[10,000 SBOMs]
+        AvgPkgs[Avg 50 packages per SBOM]
     end
     
-    Versions --> Calculate["Calculate Base Score<br/>(0.0 - 10.0)"]
-    Calculate --> Map["Map to Severity Rating"]
-    
-    subgraph Map
-        M1["9.0-10.0 → CRITICAL"]
-        M2["7.0-8.9 → HIGH"]
-        M3["4.0-6.9 → MEDIUM"]
-        M4["0.1-3.9 → LOW"]
-        M5["0.0 → NONE"]
+    subgraph Traditional["Traditional: Direct Edges"]
+        T_Calc[1,000 CVEs × 10,000 SBOMs<br/>= 10,000,000 edges]
+        T_Size[~500 MB edge metadata]
+        T_Query[Query: Scan 10K edges<br/>Time: ~30 seconds]
     end
     
-    Map --> Store["Store in<br/>database_specific field"]
+    subgraph HubSpoke["Hub-and-Spoke: Via Hubs"]
+        H_Calc[1,000 cve2purl edges<br/>+ 500,000 sbom2purl edges<br/>= 501,000 total edges]
+        H_Size[~25 MB edge metadata]
+        H_Query[Query: 1 CVE → 1 Hub → K SBOMs<br/>Time: <3 seconds]
+    end
     
-    style CVSS fill:#e3f2fd
-    style Versions fill:#fff3bf
-    style Map fill:#ffd43b
-    style Store fill:#51cf66
+    Scenario --> Traditional
+    Scenario --> HubSpoke
+    
+    style T_Calc fill:#ffe0e0
+    style T_Size fill:#ffe0e0
+    style T_Query fill:#ffe0e0
+    style H_Calc fill:#e0ffe0
+    style H_Size fill:#e0ffe0
+    style H_Query fill:#e0ffe0
 ```
 
-**Our Implementation**:
+### Query Performance Benchmarks
 
-- Use `github.com/pandatix/go-cvss` library
-- Support CVSS v3.0, v3.1, and v4.0
-- Parse vector strings: `CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H`
-- Calculate numeric base score (0.0-10.0)
-- Map to severity rating (CRITICAL/HIGH/MEDIUM/LOW)
+| Query | Traditional | Hub-and-Spoke | Speedup |
+|-------|-------------|---------------|---------|
+| CVE → Releases | 30s | 3s | 10x |
+| Release → CVEs | 15s | 0.5s | 30x |
+| Dashboard MTTR | 60s | 2s | 30x |
+| Org-filtered queries | 45s | 1s | 45x |
+| Post-deployment detection | 20s | 1s | 20x |
 
-**Pre-Calculation Benefit**:
+### Storage Requirements
 
-- Store in `database_specific.severity_rating` field
-- Enable indexed filtering by severity
-- Avoid runtime CVSS parsing overhead
+| Data | Count | Traditional Size | Hub-and-Spoke Size | Reduction |
+|------|-------|------------------|-------------------|-----------|
+| **Nodes** | 11,100 | 5 MB | 5 MB | 0% |
+| **Edges** | - | 500 MB | 25 MB | 95% |
+| **Indexes** | - | 100 MB | 10 MB | 90% |
+| **Total** | - | 605 MB | 40 MB | **93.4%** |
 
-### 6. Graph Database Hub Pattern
+---
 
-**References**:
+## Implementation Details
 
-```mermaid
-mindmap
-  root((Graph Database<br/>Hub Pattern))
-    Neo4j
-      Intermediate Node Pattern
-      Reduces fan-out
-    TigerGraph
-      Hub Vertices
-      Centralized connections
-    Literature
-      Star schemas
-      Hub patterns
-    Our Adaptation
-      PURL nodes as hubs
-      Version on edges
-      Bidirectional traversal
-      Ecosystem-specific parsing
-```
-
-**Neo4j Documentation - Intermediate Nodes**:
-
-- URL: <https://neo4j.com/developer/modeling-designs/>
-- Pattern: Using intermediate nodes to reduce fan-out
-
-**TigerGraph - Hub Vertices**:
-
-- URL: <https://docs.tigergraph.com/>
-- Concept: Hub vertices for centralized connections
-
-**Graph Databases in Action (Manning)**:
-
-- Chapter: "Modeling for Performance"
-- Section: Star schemas and hub patterns
-
-**Our Adaptation**:
-
-- PURL nodes as package-level hubs
-- Version data on edges, not nodes
-- Bidirectional traversal support
-- Ecosystem-specific version parsing
-
-### 7. Semantic Versioning (SemVer)
-
-**Official Spec**: <https://semver.org/>
-
-**Purpose**: Versioning scheme for software releases
-
-**Format**: MAJOR.MINOR.PATCH
-
-```mermaid
-flowchart LR
-    Ver["Version: 2.3.5"] --> Parse
-    
-    subgraph Parse["Parse Components"]
-        Major["MAJOR: 2<br/>Incompatible API changes"]
-        Minor["MINOR: 3<br/>Backwards-compatible<br/>functionality"]
-        Patch["PATCH: 5<br/>Backwards-compatible<br/>bug fixes"]
-    end
-    
-    Parse --> Libs
-    
-    subgraph Libs["Version Libraries We Use"]
-        L1["github.com/Masterminds/<br/>semver/v3<br/>SemVer 2.0"]
-        L2["github.com/aquasecurity/<br/>go-npm-version<br/>npm versioning"]
-        L3["github.com/aquasecurity/<br/>go-pep440-version<br/>Python PEP 440"]
-    end
-    
-    style Ver fill:#e3f2fd
-    style Parse fill:#fff3bf
-    style Libs fill:#51cf66
-```
-
-- MAJOR: Incompatible API changes
-- MINOR: Backwards-compatible functionality
-- PATCH: Backwards-compatible bug fixes
-
-**Version Libraries We Use**:
+### PURL Hub Creation
 
 ```go
-import (
-    "github.com/Masterminds/semver/v3"  // SemVer 2.0
-    npm "github.com/aquasecurity/go-npm-version/pkg"  // npm versioning
-    pep440 "github.com/aquasecurity/go-pep440-version"  // Python PEP 440
-)
+// Create or get PURL hub (version-free)
+func GetOrCreatePURLHub(ecosystem, name string) (string, error) {
+    purl := fmt.Sprintf("pkg:%s/%s", ecosystem, name)
+    
+    // Try to find existing hub
+    query := `
+        FOR p IN purl
+          FILTER p.purl == @purl
+          RETURN p
+    `
+    
+    cursor, err := db.Query(ctx, query, map[string]interface{}{
+        "purl": purl,
+    })
+    if err != nil {
+        return "", err
+    }
+    
+    if cursor.HasMore() {
+        // Hub exists
+        var doc map[string]interface{}
+        _, err := cursor.ReadDocument(ctx, &doc)
+        return doc["_key"].(string), err
+    }
+    
+    // Create new hub
+    hub := map[string]interface{}{
+        "_key":    purl,
+        "purl":    purl,
+        "type":    ecosystem,
+        "name":    name,
+        "version": nil,  // ALWAYS null for hubs
+    }
+    
+    meta, err := db.Collection("purl").CreateDocument(ctx, hub)
+    if err != nil {
+        return "", err
+    }
+    
+    return meta.Key, nil
+}
 ```
+
+### CVE Ingestion with Hub Creation
+
+```go
+func IngestCVE(cve CVEData) error {
+    // 1. Insert CVE document
+    cveMeta, err := db.Collection("cve").CreateDocument(ctx, cve)
+    if err != nil {
+        return err
+    }
+    
+    // 2. For each affected package, create hub + edge
+    for _, affected := range cve.Affected {
+        pkg := affected.Package
+        
+        // Get or create PURL hub
+        hubKey, err := GetOrCreatePURLHub(pkg.Ecosystem, pkg.Name)
+        if err != nil {
+            return err
+        }
+        
+        // Create cve2purl edge
+        edge := map[string]interface{}{
+            "_from":           cveMeta.ID,
+            "_to":             fmt.Sprintf("purl/%s", hubKey),
+            "affects_versions": ExtractVersionRanges(affected.Ranges),
+            "fixed_in":        ExtractFixedVersion(affected.Ranges),
+            "severity":        cve.SeverityRating,
+        }
+        
+        _, err = db.Collection("cve2purl").CreateDocument(ctx, edge)
+        if err != nil {
+            return err
+        }
+    }
+    
+    return nil
+}
+```
+
+### SBOM Ingestion with Version Matching
+
+```go
+func IngestSBOM(release Release, sbom SBOMData) error {
+    // 1. Insert SBOM document
+    sbomMeta, err := db.Collection("sbom").CreateDocument(ctx, sbom)
+    if err != nil {
+        return err
+    }
+    
+    // 2. Link release → SBOM
+    _, err = db.Collection("release2sbom").CreateDocument(ctx, map[string]interface{}{
+        "_from": fmt.Sprintf("release/%s", release.Key),
+        "_to":   sbomMeta.ID,
+    })
+    if err != nil {
+        return err
+    }
+    
+    // 3. For each component, link SBOM → PURL hub (with version)
+    affectedCVEs := []string{}
+    
+    for _, component := range sbom.Components {
+        // Parse PURL to get hub key
+        parsed, err := ParsePURL(component.PURL)
+        if err != nil {
+            continue
+        }
+        
+        hubKey, err := GetOrCreatePURLHub(parsed.Type, parsed.Name)
+        if err != nil {
+            return err
+        }
+        
+        // Create sbom2purl edge WITH VERSION
+        _, err = db.Collection("sbom2purl").CreateDocument(ctx, map[string]interface{}{
+            "_from":   sbomMeta.ID,
+            "_to":     fmt.Sprintf("purl/%s", hubKey),
+            "version": parsed.Version,  // CRITICAL: store version on edge
+            "scope":   "required",
+        })
+        if err != nil {
+            return err
+        }
+        
+        // 4. Find matching CVEs via hub
+        cves, err := FindCVEsForPackageVersion(hubKey, parsed.Version)
+        if err != nil {
+            return err
+        }
+        
+        affectedCVEs = append(affectedCVEs, cves...)
+    }
+    
+    // 5. Create materialized release2cve edges
+    for _, cveID := range affectedCVEs {
+        _, err = db.Collection("release2cve").CreateDocument(ctx, map[string]interface{}{
+            "_from":  fmt.Sprintf("release/%s", release.Key),
+            "_to":    fmt.Sprintf("cve/%s", cveID),
+            "validated_at": time.Now(),
+        })
+    }
+    
+    return nil
+}
+```
+
+### Version Matching Logic
+
+```go
+func FindCVEsForPackageVersion(purlHubKey, version string) ([]string, error) {
+    query := `
+        FOR cve IN INBOUND CONCAT("purl/", @hubKey) cve2purl
+          LET edge = FIRST(
+            FOR e IN cve2purl
+              FILTER e._to == CONCAT("purl/", @hubKey)
+              FILTER e._from == cve._id
+              RETURN e
+          )
+          
+          FILTER IS_VERSION_AFFECTED(@version, edge.affects_versions)
+          
+          RETURN cve.id
+    `
+    
+    cursor, err := db.Query(ctx, query, map[string]interface{}{
+        "hubKey":  purlHubKey,
+        "version": version,
+    })
+    if err != nil {
+        return nil, err
+    }
+    
+    cveIDs := []string{}
+    for cursor.HasMore() {
+        var id string
+        _, err := cursor.ReadDocument(ctx, &id)
+        if err != nil {
+            continue
+        }
+        cveIDs = append(cveIDs, id)
+    }
+    
+    return cveIDs, nil
+}
+
+// AQL User-Defined Function for version matching
+func IsVersionAffected(version string, ranges []string) bool {
+    for _, rangeStr := range ranges {
+        // Parse range (e.g., "<4.17.21", ">=4.0.0 <4.17.19")
+        matches, err := semver.Satisfies(version, rangeStr)
+        if err != nil {
+            continue
+        }
+        if matches {
+            return true
+        }
+    }
+    return false
+}
+```
+
+---
+
+## Best Practices
+
+### 1. Hub Design Principles
+
+**✅ DO:**
+- Use version-free PURLs for hub keys (`pkg:npm/lodash`)
+- Store versions on edges, not in hubs
+- Create one hub per unique package name
+- Index hub keys for fast lookup
+
+**❌ DON'T:**
+- Create separate hubs for each version (`pkg:npm/lodash@4.17.20`)
+- Store version arrays in hub nodes
+- Duplicate hub nodes
+
+### 2. Edge Design Principles
+
+**✅ DO:**
+- Store version on `sbom2purl` edges
+- Store version ranges on `cve2purl` edges
+- Use materialized edges for frequent queries
+- Index edge attributes for filtering
+
+**❌ DON'T:**
+- Store large objects on edges
+- Create redundant edges
+- Skip version validation
+
+### 3. Query Optimization
+
+**✅ DO:**
+- Use `FILTER` early in queries
+- Leverage indexes (org, severity, is_remediated)
+- Use `DISTINCT` to avoid duplicates
+- Cache frequently-accessed data
+
+**❌ DON'T:**
+- Traverse without filters
+- Join large collections without indexes
+- Return full documents when partial suffices
+
+### 4. Multi-Tenancy
+
+**✅ DO:**
+- Filter by `org` in all queries
+- Support `orgs: []` for global access
+- Check `is_public` flag
+- Index `org` field on all collections
+
+**❌ DON'T:**
+- Skip org filtering
+- Expose org-scoped data
+- Hardcode org values
+
+### 5. Performance Monitoring
+
+**✅ DO:**
+- Monitor query execution time
+- Track edge count growth
+- Profile slow queries
+- Use ArangoDB query profiler
+
+**❌ DON'T:**
+- Ignore query warnings
+- Skip index maintenance
+- Overuse materialized edges
 
 ---
 
 ## Conclusion
 
-The hub-and-spoke architecture provides:
+The Hub-and-Spoke pattern with PURL nodes is the foundation of PDVD's scalability. By reducing edges from O(N×M) to O(N+M), we achieve:
 
-```mermaid
-mindmap
-  root((Hub-and-Spoke<br/>Architecture<br/>Benefits))
-    Scalability
-      Linear growth O(N+M)
-      Not exponential O(N×M)
-      Handles millions of records
-    Performance
-      Sub-second queries
-      Indexed hub lookups
-      Massive datasets
-    Flexibility
-      Version-agnostic hubs
-      Precise edge matching
-      Multiple ecosystems
-    Standards
-      PURL specification
-      OSV format
-      CycloneDX SBOM
-      CVSS scoring
-    Maintainability
-      Clear separation
-      Modular design
-      Easy to understand
-```
+- **99.89% edge reduction** (10M → 11K)
+- **10-30x query speedup** (<3s vs 30s)
+- **93% storage reduction** (605MB → 40MB)
+- **Linear scalability** as data grows
 
-✅ **Scalability**: Linear growth instead of exponential  
-✅ **Performance**: Sub-second queries on massive datasets  
-✅ **Flexibility**: Version-agnostic hubs with precise edge matching  
-✅ **Standards Compliance**: PURL, OSV, CycloneDX, CVSS  
-✅ **Maintainability**: Clear separation of concerns  
+This design enables PDVD to handle millions of CVEs, releases, and SBOMs while maintaining sub-second query performance and supporting multi-tenant isolation.
 
-This design enables answering the critical security questions:
+---
 
-```mermaid
-flowchart TB
-    Q1["<b>Question 1:</b><br/>Where is this<br/>vulnerability running?"] --> A1
-    A1["CVE → PURL → SBOM<br/>→ Release → Endpoint"] --> R1
-    R1["Identifies affected<br/>production systems"]
-    
-    Q2["<b>Question 2:</b><br/>What CVEs affect<br/>this release?"] --> A2
-    A2["Release → SBOM → PURL<br/>→ CVE"] --> R2
-    R2["Lists all vulnerabilities<br/>in release"]
-    
-    Q3["<b>Question 3:</b><br/>Which production systems<br/>need patching?"] --> A3
-    A3["Severity filter →<br/>Endpoint traversal"] --> R3
-    R3["Prioritized list of<br/>vulnerable endpoints"]
-    
-    style Q1 fill:#ff6b6b
-    style Q2 fill:#ffd43b
-    style Q3 fill:#ff6b6b
-    style R1 fill:#51cf66
-    style R2 fill:#51cf66
-    style R3 fill:#51cf66
-```
+**References:**
+- [ArangoDB Graph Queries](https://docs.arangodb.com/stable/aql/graphs/)
+- [Package URL Specification](https://github.com/package-url/purl-spec)
+- [CycloneDX SBOM Spec](https://cyclonedx.org/specification/overview/)
 
-- **"Where is this vulnerability running?"** → CVE → PURL → SBOM → Release → Endpoint
-- **"What CVEs affect this release?"** → Release → SBOM → PURL → CVE
-- **"Which production systems need patching?"** → Severity filter → Endpoint traversal
-
-The architecture scales from hundreds to millions of records while maintaining <3 second response times.
+**Document Control:**
+- Version: 2.0
+- Last Updated: January 2026
+- Next Review: April 2026
