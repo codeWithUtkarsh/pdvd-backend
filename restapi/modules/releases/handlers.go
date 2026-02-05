@@ -16,45 +16,112 @@ import (
 	"github.com/ortelius/pdvd-backend/v12/util"
 )
 
-// PostReleaseWithSBOM handles POST requests for creating a release with its SBOM
+// ProcessReleaseIngestion encapsulates the core logic for saving a release,
+// processing its SBOM, and linking it to CVEs. This function is shared by
+// both the REST API handler and the Kafka event processor to ensure identical behavior.
+func ProcessReleaseIngestion(ctx context.Context, db database.DBConnection, rel model.ReleaseWithSBOM) (string, error) {
+	// 1. Standardize Metadata
+	rel.ParseAndSetVersion()
+	rel.ParseAndSetNameComponents()
+	PopulateContentSha(&rel.ProjectRelease)
+
+	if rel.ContentSha == "" {
+		return "", fmt.Errorf("ContentSha is required (GitCommit or DockerSha must be provided)")
+	}
+
+	// 2. Check for existing release by composite natural key (name + version + contentsha)
+	existingReleaseKey, err := database.FindReleaseByCompositeKey(ctx, db.Database,
+		rel.Name,
+		rel.Version,
+		rel.ContentSha,
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to check for existing release: %w", err)
+	}
+
+	var releaseID string
+	if existingReleaseKey != "" {
+		// Release already exists, use existing key
+		releaseID = "release/" + existingReleaseKey
+		rel.Key = existingReleaseKey
+	} else {
+		// Save new ProjectRelease to ArangoDB
+		releaseMeta, err := db.Collections["release"].CreateDocument(ctx, rel.ProjectRelease)
+		if err != nil {
+			return "", fmt.Errorf("failed to save release: %w", err)
+		}
+		releaseID = "release/" + releaseMeta.Key
+		rel.Key = releaseMeta.Key
+	}
+
+	// 3. Process SBOM (handles deduplication via content hashing)
+	_, sbomID, err := sbom.ProcessSBOM(ctx, db, rel.SBOM)
+	if err != nil {
+		return "", fmt.Errorf("failed to process SBOM: %w", err)
+	}
+
+	// 4. Update Relationship (Delete old edges and create new one)
+	if err := DeleteRelease2SBOMEdges(ctx, db, releaseID); err != nil {
+		return "", err
+	}
+
+	edge := map[string]interface{}{
+		"_from": releaseID,
+		"_to":   sbomID,
+	}
+	if _, err := db.Collections["release2sbom"].CreateDocument(ctx, edge); err != nil {
+		return "", fmt.Errorf("failed to create release-sbom relationship: %w", err)
+	}
+
+	// 5. Process SBOM components and create PURL relationships
+	if err := sbom.ProcessSBOMComponents(ctx, db, rel.SBOM, sbomID); err != nil {
+		return "", fmt.Errorf("failed to process SBOM components: %w", err)
+	}
+
+	// 6. Link Release directly to CVEs (Materialized Edges for static analysis)
+	if err := deleteRelease2CVEEdges(ctx, db, releaseID); err != nil {
+		fmt.Printf("Warning: Failed to cleanup old CVE edges: %v\n", err)
+	}
+
+	if err := linkReleaseToExistingCVEs(ctx, db, releaseID, rel.Key); err != nil {
+		return "", fmt.Errorf("error linking release to CVEs: %w", err)
+	}
+
+	return releaseID, nil
+}
+
+// PostReleaseWithSBOM handles POST requests for creating a release with its SBOM.
+// It delegates core processing to ProcessReleaseIngestion.
 func PostReleaseWithSBOM(db database.DBConnection) fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		var req model.ReleaseWithSBOM
 
 		// Parse request body
 		if err := c.BodyParser(&req); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(ReleaseWithSBOMResponse{
-				Success: false,
-				Message: "Invalid request body: " + err.Error(),
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"success": false,
+				"message": "Invalid request body: " + err.Error(),
 			})
 		}
 
-		// Validate required fields for Release
-		if req.Name == "" || req.Version == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(ReleaseWithSBOMResponse{
-				Success: false,
-				Message: "Release name and version are required fields",
-			})
-		}
-
-		// Validate SBOM content
-		if len(req.SBOM.Content) == 0 {
-			return c.Status(fiber.StatusBadRequest).JSON(ReleaseWithSBOMResponse{
-				Success: false,
-				Message: "SBOM content is required",
+		// Validate required fields
+		if req.Name == "" || req.Version == "" || len(req.SBOM.Content) == 0 {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"success": false,
+				"message": "Release name, version, and SBOM content are required",
 			})
 		}
 
 		// Validate SBOM content is valid JSON
 		var sbomContent interface{}
 		if err := json.Unmarshal(req.SBOM.Content, &sbomContent); err != nil {
-			return c.Status(fiber.StatusBadRequest).JSON(ReleaseWithSBOMResponse{
-				Success: false,
-				Message: "SBOM content must be valid JSON: " + err.Error(),
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"success": false,
+				"message": "SBOM content must be valid JSON: " + err.Error(),
 			})
 		}
 
-		// Set ObjType if not already set
+		// Set default ObjTypes
 		if req.ObjType == "" {
 			req.ObjType = "ProjectRelease"
 		}
@@ -62,127 +129,23 @@ func PostReleaseWithSBOM(db database.DBConnection) fiber.Handler {
 			req.SBOM.ObjType = "SBOM"
 		}
 
-		// Parse and set version components from the version string
-		req.ParseAndSetVersion()
-
-		// Parse and set name components
-		req.ParseAndSetNameComponents()
-
 		ctx := context.Background()
-
-		// Populate ContentSha based on project type
-		PopulateContentSha(&req.ProjectRelease)
-
-		// Validate ContentSha is set
-		if req.ContentSha == "" {
-			return c.Status(fiber.StatusBadRequest).JSON(ReleaseWithSBOMResponse{
-				Success: false,
-				Message: "ContentSha is required (GitCommit or DockerSha must be provided)",
-			})
-		}
-
-		// Check for existing release by composite natural key (name + version + contentsha)
-		existingReleaseKey, err := database.FindReleaseByCompositeKey(ctx, db.Database,
-			req.Name,
-			req.Version,
-			req.ContentSha,
-		)
+		_, err := ProcessReleaseIngestion(ctx, db, req)
 		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(ReleaseWithSBOMResponse{
-				Success: false,
-				Message: "Failed to check for existing release: " + err.Error(),
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"success": false,
+				"message": err.Error(),
 			})
 		}
 
-		var releaseID string
-
-		if existingReleaseKey != "" {
-			// Release already exists, use existing key
-			releaseID = "release/" + existingReleaseKey
-			req.Key = existingReleaseKey
-		} else {
-			// Save new ProjectRelease to ArangoDB
-			releaseMeta, err := db.Collections["release"].CreateDocument(ctx, req.ProjectRelease)
-			if err != nil {
-				return c.Status(fiber.StatusInternalServerError).JSON(ReleaseWithSBOMResponse{
-					Success: false,
-					Message: "Failed to save release: " + err.Error(),
-				})
-			}
-			releaseID = "release/" + releaseMeta.Key
-			req.Key = releaseMeta.Key
-		}
-
-		// Process SBOM
-		existingSBOMKey, sbomID, err := sbom.ProcessSBOM(ctx, db, req.SBOM)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(ReleaseWithSBOMResponse{
-				Success: false,
-				Message: "Failed to process SBOM: " + err.Error(),
-			})
-		}
-
-		// Delete any existing release2sbom edges for this release
-		err = DeleteRelease2SBOMEdges(ctx, db, releaseID)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(ReleaseWithSBOMResponse{
-				Success: false,
-				Message: "Failed to remove old release-sbom relationships: " + err.Error(),
-			})
-		}
-
-		// Create new edge relationship between release and sbom
-		edge := map[string]interface{}{
-			"_from": releaseID,
-			"_to":   sbomID,
-		}
-		_, err = db.Collections["release2sbom"].CreateDocument(ctx, edge)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(ReleaseWithSBOMResponse{
-				Success: false,
-				Message: "Failed to create release-sbom relationship: " + err.Error(),
-			})
-		}
-
-		// Process SBOM components and create PURL relationships
-		err = sbom.ProcessSBOMComponents(ctx, db, req.SBOM, sbomID)
-		if err != nil {
-			return c.Status(fiber.StatusInternalServerError).JSON(ReleaseWithSBOMResponse{
-				Success: false,
-				Message: "Failed to process SBOM components: " + err.Error(),
-			})
-		}
-
-		// Link Release directly to CVEs (Materialized Edges)
-		if err := deleteRelease2CVEEdges(ctx, db, releaseID); err != nil {
-			fmt.Printf("Warning: Failed to cleanup old CVE edges: %v\n", err)
-		}
-
-		if err := linkReleaseToExistingCVEs(ctx, db, releaseID, req.Key); err != nil {
-			fmt.Printf("Error linking release to CVEs: %v\n", err)
-		}
-
-		// Determine success message
-		var message string
-		switch {
-		case existingReleaseKey != "" && existingSBOMKey != "":
-			message = "Release and SBOM already exist (matched by name+version+contentsha and content hash)"
-		case existingReleaseKey != "":
-			message = "Release already exists (matched by name+version+contentsha), SBOM created and linked"
-		case existingSBOMKey != "":
-			message = "SBOM already exists (matched by content hash), Release created and linked"
-		default:
-			message = "Release and SBOM created successfully"
-		}
-
-		return c.Status(fiber.StatusCreated).JSON(ReleaseWithSBOMResponse{
-			Success: true,
-			Message: message,
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+			"success": true,
+			"message": "Release and SBOM processed successfully",
 		})
 	}
 }
 
-// PopulateContentSha sets the ContentSha field based on project type
+// PopulateContentSha sets the ContentSha field based on project type.
 func PopulateContentSha(release *model.ProjectRelease) {
 	if release.ProjectType == "docker" || release.ProjectType == "container" {
 		if release.DockerSha != "" {
@@ -199,7 +162,7 @@ func PopulateContentSha(release *model.ProjectRelease) {
 	}
 }
 
-// DeleteRelease2SBOMEdges deletes all existing release2sbom edges for a given release
+// DeleteRelease2SBOMEdges deletes all existing release2sbom edges for a given release.
 func DeleteRelease2SBOMEdges(ctx context.Context, db database.DBConnection, releaseID string) error {
 	query := `
 		FOR e IN release2sbom
@@ -221,7 +184,7 @@ func DeleteRelease2SBOMEdges(ctx context.Context, db database.DBConnection, rele
 	return nil
 }
 
-// deleteRelease2CVEEdges deletes all existing release2cve edges for a given release
+// deleteRelease2CVEEdges deletes all existing release2cve edges for a given release.
 func deleteRelease2CVEEdges(ctx context.Context, db database.DBConnection, releaseID string) error {
 	query := `
 		FOR e IN release2cve
@@ -238,8 +201,7 @@ func deleteRelease2CVEEdges(ctx context.Context, db database.DBConnection, relea
 	return err
 }
 
-// linkReleaseToExistingCVEs finds matching CVEs for a release and creates materialized edges
-// FIXED: Uses centralized PURL standardization for consistent Hub joins
+// linkReleaseToExistingCVEs finds matching CVEs for a release and creates materialized edges.
 func linkReleaseToExistingCVEs(ctx context.Context, db database.DBConnection, releaseID, releaseKey string) error {
 	query := `
 		FOR r IN release

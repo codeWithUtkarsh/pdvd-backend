@@ -7,6 +7,7 @@ import "encoding/json"
 type SBOM struct {
 	Key        string          `json:"_key,omitempty"`
 	ContentSha string          `json:"contentsha,omitempty"` // SHA256 hash of content for deduplication
+	CID        string          `json:"cid,omitempty"`
 	ObjType    string          `json:"objtype,omitempty"`
 	Content    json.RawMessage `json:"content"`
 }
