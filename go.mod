@@ -6,7 +6,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/aquasecurity/go-npm-version v0.0.2
 	github.com/aquasecurity/go-pep440-version v0.0.1
-	github.com/arangodb/go-driver/v2 v2.2.0
+	github.com/arangodb/go-driver/v2 v2.1.0
 	github.com/cenkalti/backoff v2.2.1+incompatible
 	github.com/go-git/go-git/v5 v5.17.0
 	github.com/gofiber/fiber/v3 v3.1.0
